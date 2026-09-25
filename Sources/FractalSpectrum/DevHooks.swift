@@ -46,6 +46,7 @@ final class DevHooks {
         case "quality": if let q = Quality(rawValue: arg) { model.quality = q }
         case "autopilot": model.autopilot = arg == "on"
         case "julia": model.toggleJulia()
+        case "iter": model.iter.maxIter = Int(arg) ?? model.iter.maxIter
         case "light": model.color.lightStrength = Double(arg) ?? model.color.lightStrength
         case "density": model.color.density = Double(arg) ?? model.color.density
         case "mapping": model.color.mapping = Int(arg) ?? model.color.mapping
@@ -85,6 +86,7 @@ final class DevHooks {
                                   s.view.zoomText, s.maxIter, s.fps, s.gpuMs, s.stage, s.samples, "\(s.perturbed)", d.x, d.y)
                 try? text.write(toFile: arg, atomically: true, encoding: .utf8)
             }
+        case "where": try? model.coordinatesText.write(toFile: arg, atomically: true, encoding: .utf8)
         case "settled":
             // writes "1" to the given file once the view is fully refined
             waitSettled(then: { try? "1".write(toFile: arg, atomically: true, encoding: .utf8) })

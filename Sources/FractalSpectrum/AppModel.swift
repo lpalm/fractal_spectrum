@@ -365,12 +365,16 @@ final class AppModel {
         }
     }
 
-    func copyCoordinates() {
+    /// The view as text that `goTo(text:)` accepts.
+    var coordinatesText: String {
         let v = camera.view
         let digits = Int(v.zoomLog10) + 10
-        let text = "re: \(v.center.re.string(digits: digits))\nim: \(v.center.im.string(digits: digits))\nzoom: \(v.zoomText)"
+        return "re: \(v.center.re.string(digits: digits))\nim: \(v.center.im.string(digits: digits))\nzoom: \(v.zoomText)"
+    }
+
+    func copyCoordinates() {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        NSPasteboard.general.setString(coordinatesText, forType: .string)
         show("Coordinates copied")
     }
 
