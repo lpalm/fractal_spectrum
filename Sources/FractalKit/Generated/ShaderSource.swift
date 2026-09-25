@@ -33,7 +33,7 @@ typedef struct {
     fs_uint2 origin;        // tile origin in samples
     fs_uint2 bufferOrigin;  // sample stored at index 0 of the G-buffer
     fs_uint bufferStride;   // G-buffer row length
-    fs_uint refineOnly;     // 1: iterate only the samples marked in the refinement mask (see refine_mask)
+    fs_uint masked;         // 1: each sample does what the sample mask says (keep, iterate or inside)
     fs_uint2 workSize;      // rectangle of samples processed by this dispatch
     fs_float2 offsetM;      // mantissa of (view center - reference start); direct kernel: view center
     fs_float2 stepX;        // mantissa of the complex delta per +1 sample in x
@@ -178,13 +178,17 @@ constant bool IS_MANDEL = FORMULA == FS_FORMULA_MANDEL;
 // One G-buffer sample.
 struct GSample {
     uint n;         // escape iteration or FS_INTERIOR
-    float frac;     // smooth iteration fraction
+    float frac;     // smooth iteration fraction; for FS_INTERIOR, 1 where an attracting cycle proved it
     float de;       // log2 of the distance estimate in samples
     half2 normal;   // unit gradient direction of the escape potential
 };
 
 // How a sample's iteration ended.
 enum Outcome : uint { OUTCOME_ESCAPED = 0, OUTCOME_CYCLE = 1, OUTCOME_UNRESOLVED = 2 };
+
+// What a masked pass does with a sample (see refine_mask and inside_mask): keep the G-buffer's (an
+// earlier pass's), iterate it, or store it as inside the set without iterating.
+enum SampleMask : uchar { MASK_KEEP = 0, MASK_ITERATE = 1, MASK_INSIDE = 2 };
 
 // ---------------------------------------------------------------------------------------------
 // Small math helpers. 2x2 matrices are float4 in row-major order.
@@ -444,16 +448,19 @@ inline Derivative derivative_bla(Derivative d, FSBLAEntry E) {
     return d;
 }
 
-// The finished sample: smooth iteration count, distance estimate and normal.
-inline GSample make_sample(bool escaped, uint n, float2 z, Derivative d, constant FSIterParams &P) {
+// A sample inside the set; `proven` when an attracting cycle showed it, not just the iteration limit.
+inline GSample inside_sample(bool proven) {
     GSample s;
-    if (!escaped) {
-        s.n = FS_INTERIOR;
-        s.frac = 0.0f;
-        s.de = 0.0f;
-        s.normal = half2(0.0h);
-        return s;
-    }
+    s.n = FS_INTERIOR;
+    s.frac = proven ? 1.0f : 0.0f;
+    s.de = 0.0f;
+    s.normal = half2(0.0h);
+    return s;
+}
+
+// An escaped sample: smooth iteration count, distance estimate and normal.
+inline GSample escaped_sample(uint n, float2 z, Derivative d, constant FSIterParams &P) {
+    GSample s;
     float r2 = dot(z, z);
     s.n = n;
     s.frac = clamp(1.0f - log2(log2(r2) / P.log2Bailout2) * P.invLog2Power, 0.0f, 0.99999f);
@@ -485,10 +492,13 @@ inline void store_sample(device GSample *out, constant FSIterParams &P, uint2 pi
     out[sample_index(P, pix)] = g;
 }
 
-// Later anti-aliasing passes of an offline frame iterate only the samples refine_mask marked; the
-// others keep their first sample in the G-buffer.
-inline bool skips(constant FSIterParams &P, device const uchar *refineMask, uint2 pix, bool active) {
-    return P.refineOnly != 0u && active && refineMask[sample_index(P, pix)] == 0u;
+// Offline frames mask some passes (see SampleMask): true when this sample needs no iteration.
+inline bool masked_out(device GSample *out, constant FSIterParams &P, device const uchar *sampleMask, uint2 pix,
+                       bool active) {
+    if (P.masked == 0u || !active) return false;
+    uchar mask = sampleMask[sample_index(P, pix)];
+    if (mask == MASK_INSIDE) store_sample(out, P, pix, inside_sample(true));
+    return mask != MASK_ITERATE;
 }
 
 // Folds each thread's outcome into the pass statistics (FSStats, as uints) with one atomic per SIMD group.
@@ -521,11 +531,11 @@ inline void record_stats(device atomic_uint *stats, bool active, uint outcome, u
 kernel void iterate_direct(device GSample *out [[buffer(0)]],
                            constant FSIterParams &P [[buffer(1)]],
                            device atomic_uint *stats [[buffer(7)]],
-                           device const uchar *refineMask [[buffer(17)]],
+                           device const uchar *sampleMask [[buffer(17)]],
                            uint2 gid [[thread_position_in_grid]]) {
     uint2 pix = gid + P.origin;
     bool active = gid.x < P.workSize.x && gid.y < P.workSize.y;
-    if (skips(P, refineMask, pix, active)) return;
+    if (masked_out(out, P, sampleMask, pix, active)) return;
     float2 q = float2(pix) + 0.5f + P.jitter - 0.5f * float2(P.size);   // from the view centre, in samples
     float2 c = P.offsetM + scale2(q.x * P.stepX + q.y * P.stepY, P.stepE);
     float2 z = JULIA ? c : float2(0.0f);
@@ -567,7 +577,7 @@ kernel void iterate_direct(device GSample *out [[buffer(0)]],
     }
     if (outcome == OUTCOME_UNRESOLVED && dot(z, z) > P.bailout2) outcome = OUTCOME_ESCAPED;
     bool escaped = outcome == OUTCOME_ESCAPED;
-    if (active) store_sample(out, P, pix, make_sample(escaped, escaped ? n : P.maxIter, z, der, P));
+    if (active) store_sample(out, P, pix, escaped ? escaped_sample(n, z, der, P) : inside_sample(outcome == OUTCOME_CYCLE));
     record_stats(stats, active, outcome, n, P.maxIter, P.statsSlot);
 }
 
@@ -659,11 +669,11 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
                             device const float *criticalBLALog2MinZ [[buffer(14)]],
                             device const float *blaMaxRadius2 [[buffer(15)]],
                             device const float *criticalBLAMaxRadius2 [[buffer(16)]],
-                            device const uchar *refineMask [[buffer(17)]],
+                            device const uchar *sampleMask [[buffer(17)]],
                             uint2 gid [[thread_position_in_grid]]) {
     uint2 pix = gid + P.origin;
     bool active = gid.x < P.workSize.x && gid.y < P.workSize.y;
-    if (skips(P, refineMask, pix, active)) return;
+    if (masked_out(out, P, sampleMask, pix, active)) return;
     float2 q = float2(pix) + 0.5f + P.jitter - 0.5f * float2(P.size);
     // Offset of this sample from the reference start: dc in the parameter plane, the initial
     // difference for Julia sets (whose iteration adds no per-sample constant).
@@ -812,7 +822,7 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
         }
     }
     uint outcome = escaped ? OUTCOME_ESCAPED : (inside ? OUTCOME_CYCLE : OUTCOME_UNRESOLVED);
-    if (active) store_sample(out, P, pix, make_sample(escaped, escaped ? n : P.maxIter, zEscaped, der, P));
+    if (active) store_sample(out, P, pix, escaped ? escaped_sample(n, zEscaped, der, P) : inside_sample(inside));
     record_stats(stats, active, outcome, n, P.maxIter, P.statsSlot);
 }
 
@@ -1166,7 +1176,7 @@ kernel void refine_mask(texture2d<float, access::read> accumulator [[texture(0)]
             refine = max(d.r, max(d.g, d.b)) > R.threshold;
         }
     }
-    mask[o.y * R.stride + o.x] = refine ? 1 : 0;
+    mask[o.y * R.stride + o.x] = refine ? MASK_ITERATE : MASK_KEEP;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1193,6 +1203,26 @@ inline float3 catmull_rom(texture2d<float, access::read> image, float2 p, uint2 
         }
     }
     return clamp(sum, lo, hi);
+}
+
+// Marks the samples of a continuing video frame that need no iteration: where each lay in the previous
+// frame, whose samples the G-buffer still holds, that frame's samples all around were proven inside the
+// set, which zooming does not change. The others are iterated.
+kernel void inside_mask(device const GSample *previous [[buffer(0)]],
+                        device uchar *mask [[buffer(1)]],
+                        constant FSTemporalParams &T [[buffer(2)]],
+                        uint2 o [[thread_position_in_grid]]) {
+    if (o.x >= T.size.x || o.y >= T.size.y) return;
+    float2 q = float2(o) + 0.5f - 0.5f * float2(T.size);
+    int2 centre = int2(floor(float2(dot(T.A.xy, q), dot(T.A.zw, q)) + T.b + 0.5f * float2(T.size)));
+    bool inside = all(centre >= 1) && all(centre < int2(T.size) - 1);
+    for (int dy = -1; dy <= 1 && inside; dy++) {
+        for (int dx = -1; dx <= 1 && inside; dx++) {
+            GSample s = previous[(centre.y + dy) * int(T.size.x) + centre.x + dx];
+            inside = s.n == FS_INTERIOR && s.frac > 0.5f;
+        }
+    }
+    mask[o.y * T.size.x + o.x] = inside ? MASK_INSIDE : MASK_ITERATE;
 }
 
 // Blends a video frame's new samples (the accumulator's average) with the previous frame's image moved

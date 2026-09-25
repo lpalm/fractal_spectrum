@@ -172,7 +172,7 @@ public final class Exporter: @unchecked Sendable {
             // iterations only ever grow during a zoom-in, so colours never jump back
             let proposal = IterationTuner.adjustOffline(maxIter: iteration.maxIter, stats: stats, samples: job.width * job.height,
                                                         gpuMs: gpuMs, passes: passes)
-            iteration.maxIter = max(iteration.maxIter, proposal)
+            iteration.maxIter = max(iteration.maxIter, min(proposal, IterationTuner.videoLimit(stats: stats)))
             try movie.appendWhenReady(pixelBuffer, at: CMTime(value: CMTimeValue(frame), timescale: CMTimeScale(job.fps)))
             // previews at most four times a second, and for every frame of a slow stretch
             let preview = Date().timeIntervalSince(previewDate) >= 0.25 ? Exporter.image(from: pixelBuffer) : nil
@@ -201,13 +201,14 @@ public final class Exporter: @unchecked Sendable {
 /// Renders the frames of a zoom into a texture, moving the colour origin with the zoom from frame to
 /// frame. The first frame gets all its samples (further ones only where the first left visible
 /// differences between neighbours); each later frame gets one new sample, blended with the previous
-/// frame moved to its view, which averages about as many samples at the cost of one.
+/// frame moved to its view, which averages about as many samples at the cost of one, and skips the
+/// samples the previous frame proved inside the set all around.
 public final class FrameRenderer {
     let engine: Engine
     public let width: Int
     public let height: Int
     private let gBuffer: MTLBuffer
-    private let refineMask: MTLBuffer
+    private let sampleMask: MTLBuffer
     private let accumulator: MTLTexture
     /// The last frame's image and the next one's, alternating.
     private let images: [MTLTexture]
@@ -222,7 +223,7 @@ public final class FrameRenderer {
         self.width = width
         self.height = height
         gBuffer = engine.makeGBuffer(samples: width * height)
-        refineMask = engine.makeRefineMask(samples: width * height)
+        sampleMask = engine.makeSampleMask(samples: width * height)
         accumulator = engine.makeAccumulator(width: width, height: height)
         images = [engine.makeAccumulator(width: width, height: height), engine.makeAccumulator(width: width, height: height)]
         paced = PacedEncoder(queue: engine.queue)
@@ -254,13 +255,18 @@ public final class FrameRenderer {
             guard let plan = engine.makePlan(scene: scene, grid: grid, encoder: paced.encoder, blocking: true,
                                              statsSlot: slot) else { break }
             engine.encodeStatsReset(paced.encoder, slot: slot)
+            // the G-buffer still holds the previous frame's samples when this frame's first pass starts
+            let fillsInside = pass == 0 && reprojection != nil
+            if fillsInside, let reprojection {
+                engine.encodeInsideMask(paced.encoder, previous: gBuffer, into: sampleMask, reprojection: reprojection, size: size)
+            }
             paced.iterate(engine, plan: plan, into: gBuffer, origin: .zero, size: SIMD2(width, height),
-                          bufferOrigin: .zero, bufferStride: UInt32(width), refineMask: pass > 0 ? refineMask : nil)
+                          bufferOrigin: .zero, bufferStride: UInt32(width), sampleMask: pass > 0 || fillsInside ? sampleMask : nil)
             if pass == 0 { engine.encodeColorOrigin(paced.encoder, slot: slot, zoomed: zoomed) }
             engine.encodeColorize(paced.encoder, into: accumulator, from: region, fallback: nil, color: color,
                                   accumulate: pass > 0, size: size)
             if pass == 0 && passes > 1 {
-                engine.encodeRefineMask(paced.encoder, from: accumulator, into: refineMask, size: size, stride: UInt32(width))
+                engine.encodeRefineMask(paced.encoder, from: accumulator, into: sampleMask, size: size, stride: UInt32(width))
             }
         }
         let image = images[frameIndex % 2]

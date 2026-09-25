@@ -31,7 +31,7 @@ typedef struct {
     fs_uint2 origin;        // tile origin in samples
     fs_uint2 bufferOrigin;  // sample stored at index 0 of the G-buffer
     fs_uint bufferStride;   // G-buffer row length
-    fs_uint refineOnly;     // 1: iterate only the samples marked in the refinement mask (see refine_mask)
+    fs_uint masked;         // 1: each sample does what the sample mask says (keep, iterate or inside)
     fs_uint2 workSize;      // rectangle of samples processed by this dispatch
     fs_float2 offsetM;      // mantissa of (view center - reference start); direct kernel: view center
     fs_float2 stepX;        // mantissa of the complex delta per +1 sample in x

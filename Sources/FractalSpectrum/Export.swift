@@ -87,7 +87,14 @@ final class ExportController {
 
     // Running export
     var running = false
-    var progress = 0.0
+    var progress = 0.0 {
+        didSet {
+            let now = Date()
+            recentProgress.append((now, progress))
+            // keep the last minute, from its oldest sample on
+            while recentProgress.count > 2, now.timeIntervalSince(recentProgress[1].date) > 60 { recentProgress.removeFirst() }
+        }
+    }
     var preview: NSImage?
     var status = ""
     var lastOutput: URL?
@@ -97,17 +104,36 @@ final class ExportController {
     @ObservationIgnored var announce: ((String) -> Void)?
     @ObservationIgnored private let cancelToken = CancelToken()
     @ObservationIgnored private var startDate = Date()
+    /// When the last export ended.
+    @ObservationIgnored private var endDate: Date?
+    /// Frames of the running (or last) export; 0 for an image.
+    @ObservationIgnored private var frameCount = 0
+    /// Progress over about the last minute: its pace gives the remaining time, which the pace since
+    /// the start would underestimate where frames slow down.
+    @ObservationIgnored private var recentProgress: [(date: Date, progress: Double)] = []
 
     func cancel() { cancelToken.cancelled = true }
 
-    /// Remaining time of the running export, estimated from its progress so far.
+    /// Remaining time of the running export at its pace over about the last minute.
     var remainingTimeText: String {
-        guard running, progress > 0.02 else { return "" }
-        let elapsed = Date().timeIntervalSince(startDate)
-        let left = elapsed / progress * (1 - progress)
+        guard running, let oldest = recentProgress.first, let newest = recentProgress.last,
+              newest.progress > oldest.progress, newest.date.timeIntervalSince(oldest.date) > 3 else { return "" }
+        let left = newest.date.timeIntervalSince(oldest.date) / (newest.progress - oldest.progress) * (1 - newest.progress)
         if left < 60 { return String(format: "%.0f s left", left) }
         if left < 3600 { return String(format: "%.0f min left", left / 60) }
         return String(format: "%.1f h left", left / 3600)
+    }
+
+    /// Time taken by the running (or last) export and, for a video, its frames per second so far:
+    /// "12:05 · 3.7 fps".
+    var paceText: String {
+        guard let end = running ? Date() : endDate else { return "" }
+        let seconds = end.timeIntervalSince(startDate)
+        let whole = Int(seconds)
+        let time = whole < 3600 ? String(format: "%d:%02d", whole / 60, whole % 60)
+            : String(format: "%d:%02d:%02d", whole / 3600, whole / 60 % 60, whole % 60)
+        guard frameCount > 0, seconds > 0 else { return time }
+        return time + String(format: " · %.1f fps", progress * Double(frameCount) / seconds)
     }
 
     /// Suggested video length: about one doubling of zoom per 0.45 s, within 10 s and the longest video.
@@ -195,7 +221,7 @@ final class ExportController {
     func render(_ job: Exporter.VideoJob, to destination: URL? = nil) {
         let url = destination ?? ExportController.newFile(in: videoFolder, extension: job.codec == .prores ? "mov" : "mp4")
         let frames = job.frameCount
-        run("Frame 0 of \(frames.formatted())", to: url) { [weak self] exporter, token in
+        run("Frame 0 of \(frames.formatted())", frames: frames, to: url) { [weak self] exporter, token in
             try exporter.exportVideo(job, to: url) { fraction, image in
                 DispatchQueue.main.async {
                     self?.progress = fraction
@@ -209,13 +235,13 @@ final class ExportController {
     }
 
     /// Runs an export off the main thread, one at a time; `render` checks the token to stop early.
-    private func run(_ title: String, to url: URL,
+    private func run(_ title: String, frames: Int = 0, to url: URL,
                      render: @escaping @Sendable (Exporter, CancelToken) throws -> Void) {
         guard !running else {
             announce?("An export is already running")
             return
         }
-        begin(title)
+        begin(title, frames: frames)
         if let problem = ExportController.problem(savingTo: url.deletingLastPathComponent()) {
             return finish(url: nil, message: "Export failed: \(problem)")
         }
@@ -230,16 +256,20 @@ final class ExportController {
         }
     }
 
-    private func begin(_ text: String) {
+    private func begin(_ text: String, frames: Int) {
         cancelToken.cancelled = false
+        startDate = Date()
+        endDate = nil
+        frameCount = frames
+        recentProgress = []
         running = true
         progress = 0
         preview = nil
         status = text
-        startDate = Date()
     }
 
     private func finish(url: URL?, message: String) {
+        endDate = Date()
         running = false
         status = message
         if let url { lastOutput = url }
@@ -416,12 +446,16 @@ struct ExportSheet: View {
                     Spacer()
                     Text(export.remainingTimeText).font(.rounded(12)).foregroundStyle(.secondary).monospacedDigit()
                 }
-                if export.running {
-                    ProgressView(value: export.progress)
-                    Button("Cancel Export") { export.cancel() }.controlSize(.small)
-                } else if let url = export.lastOutput {
-                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-                        .controlSize(.small)
+                if export.running { ProgressView(value: export.progress) }
+                HStack {
+                    if export.running {
+                        Button("Cancel Export") { export.cancel() }.controlSize(.small)
+                    } else if let url = export.lastOutput {
+                        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                            .controlSize(.small)
+                    }
+                    Spacer()
+                    Text(export.paceText).font(.rounded(12)).foregroundStyle(.secondary).monospacedDigit()
                 }
             }
         }

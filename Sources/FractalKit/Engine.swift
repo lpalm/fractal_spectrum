@@ -197,16 +197,16 @@ public final class Engine: @unchecked Sendable {
     }
 
     /// Iterates the samples of `origin ..< origin + size` into `gBuffer`, laid out from `bufferOrigin`
-    /// with rows of `bufferStride` samples; with a `refineMask`, only the samples it marks.
+    /// with rows of `bufferStride` samples; with a `sampleMask` (laid out alike), as it says per sample.
     public func encodeIterate(_ encoder: MTLComputeCommandEncoder, plan: Plan, into gBuffer: MTLBuffer,
                               origin: SIMD2<UInt32>, size: SIMD2<UInt32>,
-                              bufferOrigin: SIMD2<UInt32>, bufferStride: UInt32, refineMask: MTLBuffer? = nil) {
+                              bufferOrigin: SIMD2<UInt32>, bufferStride: UInt32, sampleMask: MTLBuffer? = nil) {
         var params = plan.params
         params.origin = origin
         params.workSize = size
         params.bufferOrigin = bufferOrigin
         params.bufferStride = bufferStride
-        params.refineOnly = refineMask == nil ? 0 : 1
+        params.masked = sampleMask == nil ? 0 : 1
         encoder.setBuffer(gBuffer, offset: 0, index: 0)
         encoder.setBytes(&params, length: MemoryLayout<FSIterParams>.stride, index: 1)
         if let reference = plan.reference {
@@ -231,7 +231,7 @@ public final class Engine: @unchecked Sendable {
             bind(criticalTable?.maxRadius2, 16)
         }
         encoder.setBuffer(statsBuffer, offset: 0, index: 7)
-        encoder.setBuffer(refineMask ?? placeholderBuffer, offset: 0, index: 17)
+        encoder.setBuffer(sampleMask ?? placeholderBuffer, offset: 0, index: 17)
         gpu.dispatch2D(encoder, plan.pipeline, width: Int(size.x), height: Int(size.y))
     }
 
@@ -239,8 +239,8 @@ public final class Engine: @unchecked Sendable {
     /// at its first pass: four 8-bit steps, about what further samples could change it by.
     static let refineThreshold: Float = 4 / 255
 
-    /// Marks in `mask`, laid out like the G-buffer, the samples of the first pass in `accumulator` that
-    /// get further anti-aliasing samples (see the `refine_mask` kernel).
+    /// Sets `mask`, laid out like the G-buffer, to iterate only those samples of the first pass in
+    /// `accumulator` that need further anti-aliasing samples (see the `refine_mask` kernel).
     public func encodeRefineMask(_ encoder: MTLComputeCommandEncoder, from accumulator: MTLTexture, into mask: MTLBuffer,
                                  size: SIMD2<UInt32>, stride: UInt32) {
         var params = FSRefineParams(size: size, stride: stride, threshold: Engine.refineThreshold)
@@ -268,8 +268,23 @@ public final class Engine: @unchecked Sendable {
         gpu.dispatch2D(encoder, gpu.pipeline("temporal_blend"), width: Int(size.x), height: Int(size.y))
     }
 
-    /// A refinement mask for `samples` samples (GPU only).
-    public func makeRefineMask(samples: Int) -> MTLBuffer {
+    /// Sets `mask` to fill in, without iterating, the samples of a continuing video frame that the
+    /// previous frame, whose samples `gBuffer` still holds, proved inside the set all around where they
+    /// lay (see the `inside_mask` kernel); the others are iterated.
+    public func encodeInsideMask(_ encoder: MTLComputeCommandEncoder, previous gBuffer: MTLBuffer, into mask: MTLBuffer,
+                                 reprojection: Reprojection, size: SIMD2<UInt32>) {
+        var params = FSTemporalParams()
+        params.A = reprojection.A
+        params.b = reprojection.b
+        params.size = size
+        encoder.setBuffer(gBuffer, offset: 0, index: 0)
+        encoder.setBuffer(mask, offset: 0, index: 1)
+        encoder.setBytes(&params, length: MemoryLayout<FSTemporalParams>.stride, index: 2)
+        gpu.dispatch2D(encoder, gpu.pipeline("inside_mask"), width: Int(size.x), height: Int(size.y))
+    }
+
+    /// A sample mask for `samples` samples (GPU only): per sample, keep, iterate or fill in as inside.
+    public func makeSampleMask(samples: Int) -> MTLBuffer {
         gpu.device.makeBuffer(length: max(samples, 1), options: .storageModePrivate)!
     }
 
@@ -590,7 +605,7 @@ extension Engine {
         calibrate(scene: &scene, width: width, height: height, updateColors: options.colorOrigin == nil)
         let tileSide = min(Engine.stillTileSize, max(width, height))
         let gBuffer = makeGBuffer(samples: tileSide * tileSide)
-        let refineMask = makeRefineMask(samples: tileSide * tileSide)
+        let sampleMask = makeSampleMask(samples: tileSide * tileSide)
         let accumulator = makeAccumulator(width: tileSide, height: tileSide)
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: tileSide,
                                                                   height: tileSide, mipmapped: false)
@@ -614,11 +629,11 @@ extension Engine {
                                               statsSlot: slot) else { return nil }
                     paced.iterate(self, plan: plan, into: gBuffer, origin: SIMD2(x0, y0), size: SIMD2(w, h),
                                   bufferOrigin: SIMD2(UInt32(x0), UInt32(y0)), bufferStride: UInt32(w),
-                                  refineMask: sample > 0 ? refineMask : nil)
+                                  sampleMask: sample > 0 ? sampleMask : nil)
                     encodeColorize(paced.encoder, into: accumulator, from: GBufferRegion(buffer: gBuffer, size: size),
                                    fallback: nil, color: color, accumulate: sample > 0, size: size)
                     if sample == 0 && options.samples > 1 {
-                        encodeRefineMask(paced.encoder, from: accumulator, into: refineMask, size: size, stride: UInt32(w))
+                        encodeRefineMask(paced.encoder, from: accumulator, into: sampleMask, size: size, stride: UInt32(w))
                     }
                     if sample == options.samples - 1 {
                         encodePresent(paced.encoder, from: accumulator, into: tileImage, sourceSize: size,
@@ -685,6 +700,13 @@ public enum IterationTuner {
             return max(lowestLimit, highestEscape * 3)
         }
         return maxIter
+    }
+
+    /// Highest limit a zoom video raises to, for a view with these statistics: 16 000, or 16 times its
+    /// earliest escape in deeper views. Later escapes are the thin edge of a minibrot, whose few pixels
+    /// would otherwise cost most of each frame.
+    public static func videoLimit(stats: FSStats) -> Int {
+        stats.escaped == 0 ? highestLimit : max(16_000, 16 * Int(stats.lowestEscape))
     }
 
     /// `adjust` for offline renders: a raise must keep the average sample within

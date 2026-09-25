@@ -418,6 +418,10 @@ struct ExportSection: View {
                     }
                     .font(.rounded(11, .medium))
                     ProgressView(value: model.export.progress).controlSize(.small)
+                    Text(model.export.paceText)
+                        .font(.rounded(11))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
                 }
             }
         }
