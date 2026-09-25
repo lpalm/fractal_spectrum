@@ -227,6 +227,23 @@ struct PlacesSection: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("Flight speed")
+                        .font(.rounded(12, .medium))
+                    Spacer()
+                    Text("\(Int(model.flightSpeed)) doublings a second")
+                        .font(.rounded(11))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                // logarithmic, like the zoom itself
+                Slider(value: Binding(get: { log(model.flightSpeed) }, set: { model.flightSpeed = exp($0).rounded() }),
+                       in: log(5)...log(100))
+                    .controlSize(.small)
+            }
+            .padding(.top, 4)
+            .help("Flights zoom at most this fast: slower stays sharp, but the deepest places take longer to reach.")
         } trailing: {
             Button { model.addBookmark() } label: {
                 Label("Save view", systemImage: "plus")

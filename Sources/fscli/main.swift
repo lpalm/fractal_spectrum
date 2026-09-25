@@ -296,8 +296,12 @@ func minibrot() {
 func flightTest() {
     let start = Viewport.home(for: Formula())
     let end = makeScene().view
-    let flight = Flight(from: start, to: end)
-    print(String(format: "path %.1f duration %.1fs", flight.pathLength, flight.duration))
+    let flight = Flight(from: start, to: end, maxZoomSpeed: arguments.double("speed", .infinity))
+    // steepest zoom along the flight, sampled
+    let steps = 4000
+    let log2Radii = (0...steps).map { flight.view(at: Double($0) / Double(steps)).log2Radius }
+    let peak = zip(log2Radii, log2Radii.dropFirst()).map { abs($1 - $0) }.max()! * Double(steps) / flight.duration
+    print(String(format: "path %.1f duration %.1fs peak zoom speed %.1f doublings/s", flight.pathLength, flight.duration, peak))
     for t in [0.0, 0.001, 0.1, 0.3, 0.5, 0.7, 0.9, 0.999, 1.0] {
         let view = flight.view(at: t)
         let fromEnd = view.center.minus(end.center).log2Abs - view.log2Radius

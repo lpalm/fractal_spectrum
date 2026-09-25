@@ -57,6 +57,13 @@ final class AppModel {
     }
     /// Lets the palette drift slowly ("Animate colours").
     var cycleColors = false
+    /// Top zoom speed of flights between places, in doublings per second.
+    var flightSpeed = UserDefaults.standard.object(forKey: "flightSpeed") as? Double ?? 20 {
+        didSet {
+            UserDefaults.standard.set(flightSpeed, forKey: "flightSpeed")
+            camera.maxZoomSpeed = flightSpeed
+        }
+    }
     /// Extended dynamic range output on HDR-capable displays.
     var hdr = UserDefaults.standard.object(forKey: "hdr") as? Bool ?? true {
         didSet { UserDefaults.standard.set(hdr, forKey: "hdr") }
@@ -137,6 +144,7 @@ final class AppModel {
             }
         }
         GPU.shared.prewarm()
+        camera.maxZoomSpeed = flightSpeed
         devHooks = DevHooks(model: self)
         loadBookmarks()
         restoreSession()

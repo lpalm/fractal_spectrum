@@ -97,7 +97,9 @@ public struct Flight: @unchecked Sendable {
     /// Centres too close to matter: the flight only zooms.
     private let pureZoom: Bool
 
-    public init(from a: Viewport, to b: Viewport, duration: Double? = nil) {
+    /// A flight from `a` to `b`, taking `duration` seconds or a length fitted to its path, but never
+    /// zooming faster than `maxZoomSpeed` doublings per second.
+    public init(from a: Viewport, to b: Viewport, duration: Double? = nil, maxZoomSpeed: Double = .infinity) {
         start = a
         end = b
         displacement = b.center.minus(a.center)
@@ -127,7 +129,9 @@ public struct Flight: @unchecked Sendable {
             r1 = -asinhOf(n1, lnDen: log(2 * rho2) + lnW1)
             pathLength = (r1 - r0) / rho
         }
-        self.duration = duration ?? min(14, max(1.2, 0.55 * pathLength))
+        // The zoom changes by at most rho natural-log units per unit of path, and the easing's steepest
+        // slope is 15/8 of its average: the zoom speed peaks at 15/8 rho pathLength / duration.
+        self.duration = max(duration ?? min(14, max(1.2, 0.55 * pathLength)), 1.875 * rho * pathLength / (log(2.0) * maxZoomSpeed))
     }
 
     private static func lncosh(_ x: Double) -> Double { abs(x) + log1p(exp(-2 * abs(x))) - log(2.0) }
@@ -181,6 +185,8 @@ public final class Camera: @unchecked Sendable {
     /// Incremented on every change of `view`.
     public private(set) var version = 0
     public var flipY = false
+    /// Top zoom speed of flights, in doublings per second: faster flights outrun the rendering.
+    public var maxZoomSpeed = Double.infinity
     /// Supported zoom range (log2 of the view radius), from the deepest view to the widest.
     public static let log2RadiusRange = -60_000.0...3.0
     /// Rates (per second) at which animated zooms and rotations settle and flings slow down.
@@ -227,7 +233,7 @@ public final class Camera: @unchecked Sendable {
     /// Flies smoothly to a view; the duration follows the length of the path unless given.
     public func fly(to v: Viewport, duration: Double? = nil) {
         stopMotion()
-        flight = Flight(from: view, to: v.normalizedPrecision(), duration: duration)
+        flight = Flight(from: view, to: v.normalizedPrecision(), duration: duration, maxZoomSpeed: maxZoomSpeed)
         flightTime = 0
     }
 
