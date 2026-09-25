@@ -22,6 +22,8 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     var aaSamples = 16 { didSet { if aaSamples != oldValue { colorVersion += 1 } } }
     var budgetMs = 7.0
     var paletteBlend: Engine.PaletteBlend?
+    /// EDR headroom when HDR output is on (nil: standard range).
+    var hdrHeadroom: Float? { didSet { if hdrHeadroom != oldValue { presentedFrontVersion = -1 } } }
     private(set) var sceneVersion = 0
     private(set) var colorVersion = 0
     /// Set when the next preview should snap colour statistics instead of easing them.
@@ -136,6 +138,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         let dt = min(now - lastTime, 0.05)
         lastTime = now
         onFrame?(dt)
+        (view as? FractalMTKView)?.syncOutputFormat()
         let ds = view.drawableSize
         let sz = SIMD2(Int(ds.width), Int(ds.height))
         guard sz.x > 0, sz.y > 0 else { return }
@@ -249,8 +252,9 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         }
         let rep = camera.view.reprojection(from: fv, width: size.x, height: size.y, flipY: camera.flipY)
         let sz = SIMD2(UInt32(size.x), UInt32(size.y))
+        let hdr = drawable.texture.pixelFormat == .rgba16Float ? hdrHeadroom : nil
         engine.encodePresent(enc, acc: display[front], dst: drawable.texture, reprojection: rep, srcSize: sz,
-                             background: color.interior, size: sz)
+                             background: color.interior, size: sz, hdrHeadroom: hdr)
         enc.endEncoding()
         cb.present(drawable)
         cb.addCompletedHandler { [weak self] _ in self?.presentInFlight.signal() }

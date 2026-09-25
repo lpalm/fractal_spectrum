@@ -384,8 +384,11 @@ public final class Engine: @unchecked Sendable {
     public func encodePresent(_ enc: MTLComputeCommandEncoder, acc: MTLTexture, dst: MTLTexture,
                               reprojection: Reprojection = .identity, srcSize: SIMD2<UInt32>? = nil,
                               dither: Float = 1.0 / 255.0, exposure: Float = 1, vignette: Float = 0,
-                              background: SIMD3<Float> = SIMD3(0.004, 0.004, 0.008), size: SIMD2<UInt32>? = nil) {
+                              background: SIMD3<Float> = SIMD3(0.004, 0.004, 0.008), size: SIMD2<UInt32>? = nil,
+                              hdrHeadroom: Float? = nil) {
         var p = FSPresentParams()
+        p.hdr = hdrHeadroom == nil ? 0 : 1
+        p.headroom = hdrHeadroom ?? 1
         p.size = size ?? SIMD2(UInt32(dst.width), UInt32(dst.height))
         p.srcSize = srcSize ?? SIMD2(UInt32(acc.width), UInt32(acc.height))
         p.identity = reprojection.identity && p.srcSize == p.size ? 1 : 0

@@ -404,6 +404,13 @@ struct ColorSection: View {
             LabeledSlider(title: "Relief", value: $model.color.lightStrength, range: 0...1)
             LabeledSlider(title: "Light angle", value: $model.color.lightAzimuth, range: -Double.pi...Double.pi)
             LabeledSlider(title: "Edges", value: $model.color.edgeStrength, range: 0...1)
+            if model.hdrAvailable {
+                Toggle("HDR highlights", isOn: $model.hdr)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .help("Let the brightest parts glow beyond standard white on HDR displays")
+            }
             Toggle("Animate colours", isOn: $model.cycleColors)
                 .font(.system(size: 12, weight: .medium, design: .rounded))
                 .toggleStyle(.switch)

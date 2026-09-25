@@ -138,8 +138,8 @@ typedef struct {
     float ditherAmp;
     float exposure;
     float vignette;
-    float pad0;
-    float pad1;
+    fs_uint hdr;            // 1: write extended-range linear Display P3 (EDR)
+    float headroom;         // EDR headroom of the display (1 = SDR)
     fs_float4 background;   // linear colour outside the source image
 } FSPresentParams;
 

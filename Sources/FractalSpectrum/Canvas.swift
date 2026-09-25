@@ -24,6 +24,25 @@ final class FractalMTKView: MTKView {
         }
     }
 
+    /// Switches the layer between standard sRGB and extended-range linear Display P3 output.
+    func configureOutput(hdr: Bool) {
+        guard let layer = layer as? CAMetalLayer else { return }
+        if hdr {
+            colorPixelFormat = .rgba16Float
+            layer.colorspace = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
+            layer.wantsExtendedDynamicRangeContent = true
+        } else {
+            colorPixelFormat = .bgra8Unorm
+            layer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
+            layer.wantsExtendedDynamicRangeContent = false
+        }
+    }
+
+    /// Live EDR headroom of the window's screen (1 when HDR is off or unsupported).
+    var edrHeadroom: Float {
+        Float(window?.screen?.maximumExtendedDynamicRangeColorComponentValue ?? 1)
+    }
+
     /// Iteration budget per frame: most of the display's frame interval.
     private func updateFrameBudget() {
         let hz = Double(window?.screen?.maximumFramesPerSecond ?? 60)
@@ -115,6 +134,14 @@ final class FractalMTKView: MTKView {
         let (w, h) = pixelSize
         model.camera.zoom(log2Factor: 2, at: location(e), width: w, height: h, animated: true)
         model.userInteracted()
+    }
+
+    /// Keeps the layer format and EDR headroom in line with the HDR setting (called every frame).
+    func syncOutputFormat() {
+        guard let model else { return }
+        let wantHDR = model.hdrEnabled
+        if wantHDR != (colorPixelFormat == .rgba16Float) { configureOutput(hdr: wantHDR) }
+        model.renderer.hdrHeadroom = wantHDR ? edrHeadroom : nil
     }
 
     override func keyDown(with e: NSEvent) {

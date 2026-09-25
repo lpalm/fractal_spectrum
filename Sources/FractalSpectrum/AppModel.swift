@@ -51,6 +51,15 @@ final class AppModel {
     var autopilot = false { didSet { if autopilot { camera.cancelFlight() } } }
     var autopilotSpeed = 1.0     // zoom doublings per second
     var cycleColors = false
+    /// Extended dynamic range output on HDR-capable displays.
+    var hdr = UserDefaults.standard.object(forKey: "hdr") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(hdr, forKey: "hdr") }
+    }
+    /// HDR is used only where the display can show it.
+    var hdrEnabled: Bool { hdr && hdrAvailable }
+    var hdrAvailable: Bool {
+        NSScreen.screens.contains { $0.maximumPotentialExtendedDynamicRangeColorComponentValue > 1.5 }
+    }
     var cycleSpeed = 0.08
 
     // Places saved by the user

@@ -885,6 +885,20 @@ kernel void present(texture2d<float, access::read> acc [[texture(0)]],
         float2 uv = (float2(o) + 0.5f) / float2(P.size) - 0.5f;
         c *= 1.0f - P.vignette * dot(uv, uv);
     }
+    if (P.hdr != 0u) {
+        // linear sRGB -> linear Display P3, then expand highlights above a knee into the EDR headroom
+        float3 p3 = float3(dot(float3(0.8225f, 0.1774f, 0.0000f), c),
+                           dot(float3(0.0332f, 0.9669f, 0.0000f), c),
+                           dot(float3(0.0171f, 0.0724f, 0.9108f), c));
+        float y = dot(c, float3(0.2126f, 0.7152f, 0.0722f));
+        const float knee = 0.55f;
+        if (P.headroom > 1.2f && y > knee) {
+            float s = (P.headroom * 0.85f - knee) / (1.0f - knee);
+            p3 *= (knee + (y - knee) * s) / y;
+        }
+        dst.write(float4(max(p3, 0.0f), 1.0f), o);
+        return;
+    }
     float n = hash12(float2(o)) + hash12(float2(o) + 17.13f) - 1.0f;
     float3 s = float3(srgb_encode(c.r), srgb_encode(c.g), srgb_encode(c.b)) + n * P.ditherAmp;
     dst.write(float4(s, 1.0f), o);
