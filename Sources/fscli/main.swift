@@ -264,10 +264,11 @@ case "minibrot":
     guard p > 0 else { print("no period found"); exit(1) }
     let prec = max(v.center.precision, Int(-v.log2Radius) * 2 + 128)
     guard let n = Minibrot.nucleus(near: v.center, period: p, precision: prec) else { print("newton failed"); exit(1) }
-    let ls = Minibrot.log2Size(nucleus: n, period: p)
+    let (ls, angle, cardioid) = Minibrot.size(nucleus: n, period: p)
     let dist = n.minus(v.center).log2Abs - v.log2Radius
     let digits = Int(-ls * 0.30103) + 12
-    print(String(format: "period %d, size 2^%.1f (1e%.1f), offset %.2f radii, %.2fs", p, ls, ls * 0.30103, exp2(dist), Date().timeIntervalSince(t0)))
+    print(String(format: "period %d %@, size 2^%.1f (1e%.1f), angle %.1f°, offset %.2f radii, %.2fs", p,
+                 cardioid ? "cardioid" : "disc", ls, ls * 0.30103, angle * 180 / .pi, exp2(dist), Date().timeIntervalSince(t0)))
     print("--re \(n.re.string(digits: digits)) --im \(n.im.string(digits: digits))")
     let zMini = (1 - (ls + log2(3.0))) * log10(2.0)
     print(String(format: "minibrot view --zoom %.2f ; embedded julia --zoom %.2f", zMini, (1 - (ls + v.log2Radius) / 2) * log10(2.0)))

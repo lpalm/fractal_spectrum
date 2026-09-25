@@ -100,9 +100,47 @@ long fs_find_nucleus(const FSHP *cre, const FSHP *cim, long period, long maxStep
     return steps;
 }
 
-// log2 of the size of the minibrot with the given nucleus and period (size ~ 1 / |b l^2|, where
-// l is the product of 2 z_i and b the sum of 1 / partial products, i = 1 .. p-1).
-double fs_nucleus_log2size(const FSHP *cre, const FSHP *cim, long period) {
+// Extended-range complex number (re + i im) * 2^e with max(|re|, |im|) in [0.5, 1), or zero.
+typedef struct { double re, im; long e; } xc;
+
+static double scale2(double x, long k) { return k < -2000 ? 0 : ldexp(x, (int)k); }
+
+static xc xc_make(double re, double im, long e) {
+    double m = fmax(fabs(re), fabs(im));
+    if (m == 0) return (xc){0, 0, 0};
+    int k;
+    frexp(m, &k);
+    return (xc){ldexp(re, -k), ldexp(im, -k), e + k};
+}
+
+static xc xc_mul(xc a, xc b) { return xc_make(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re, a.e + b.e); }
+
+static xc xc_add(xc a, xc b) {
+    if (a.re == 0 && a.im == 0) return b;
+    if (b.re == 0 && b.im == 0) return a;
+    long e = a.e > b.e ? a.e : b.e;
+    return xc_make(scale2(a.re, a.e - e) + scale2(b.re, b.e - e), scale2(a.im, a.e - e) + scale2(b.im, b.e - e), e);
+}
+
+static xc xc_div(xc a, xc b) {
+    double d = b.re * b.re + b.im * b.im;
+    return xc_make((a.re * b.re + a.im * b.im) / d, (a.im * b.re - a.re * b.im) / d, a.e - b.e);
+}
+
+static xc xc_from_mpfr(mpfr_t x, mpfr_t y) {
+    long ex = 0, ey = 0;
+    double mx = mpfr_zero_p(x) ? 0 : mpfr_get_d_2exp(&ex, x, MPFR_RNDN);
+    double my = mpfr_zero_p(y) ? 0 : mpfr_get_d_2exp(&ey, y, MPFR_RNDN);
+    return xc_add(xc_make(mx, 0, ex), xc_make(0, my, ey));
+}
+
+static double xc_log2abs(xc a) { return 0.5 * log2(a.re * a.re + a.im * a.im) + a.e; }
+
+// Size and shape estimates of the minibrot with the given nucleus and period (after Heiland-Allen):
+// it is approximately nucleus + s * M with s = 1 / (b l^2), where l is the product of 2 z_i and b the
+// sum of 1 / partial products, i = 1 .. p-1. Returns log2 |s|, writes arg s (the rotation) to *angle
+// and whether the component is a cardioid (a minibrot) rather than a disc (a bulb) to *cardioid.
+double fs_nucleus_size(const FSHP *cre, const FSHP *cim, long period, double *angle, int *cardioid) {
     long prec = mpfr_get_prec(cre->v) + 16;
     mpfr_t x, y, t0, t1, t2, cx, cy;
     mpfr_inits2(prec, x, y, t0, t1, t2, cx, cy, (mpfr_ptr)0);
@@ -110,9 +148,8 @@ double fs_nucleus_log2size(const FSHP *cre, const FSHP *cim, long period) {
     mpfr_set(cy, cim->v, MPFR_RNDN);
     mpfr_set_zero(x, 1);
     mpfr_set_zero(y, 1);
-    // l and b in (double mantissa, exponent) complex arithmetic
-    double lr = 1, li = 0; long le = 0;
-    double br = 1, bi = 0;
+    const xc one = xc_make(1, 0, 0), two = xc_make(2, 0, 0);
+    xc l = one, b = one, dc = one, dcdc = {0, 0, 0}, dcdz = {0, 0, 0};
     for (long i = 1; i < period; i++) {
         mpfr_sqr(t0, x, MPFR_RNDN);
         mpfr_sqr(t1, y, MPFR_RNDN);
@@ -121,34 +158,20 @@ double fs_nucleus_log2size(const FSHP *cre, const FSHP *cim, long period) {
         mpfr_sub(x, t0, t1, MPFR_RNDN);
         mpfr_add(x, x, cx, MPFR_RNDN);
         mpfr_add(y, t2, cy, MPFR_RNDN);
-        long ex, ey;
-        double zx = mpfr_zero_p(x) ? 0 : mpfr_get_d_2exp(&ex, x, MPFR_RNDN);
-        double zy = mpfr_zero_p(y) ? 0 : mpfr_get_d_2exp(&ey, y, MPFR_RNDN);
-        if (zx == 0) ex = -100000;
-        if (zy == 0) ey = -100000;
-        long ez = ex > ey ? ex : ey;
-        double ax = 2 * ldexp(zx, (int)(ex - ez)), ay = 2 * ldexp(zy, (int)(ey - ez));
-        // l *= 2 z
-        double nr = lr * ax - li * ay, ni = lr * ay + li * ax;
-        le += ez;
-        int k;
-        double mag = fmax(fabs(nr), fabs(ni));
-        if (mag == 0) break;
-        frexp(mag, &k);
-        lr = ldexp(nr, -k);
-        li = ldexp(ni, -k);
-        le += k;
-        // b += 1 / l
-        double d = lr * lr + li * li;
-        if (le < 900 && le > -900) {
-            double s = ldexp(1.0, (int)-le);
-            br += lr / d * s;
-            bi += -li / d * s;
-        }
+        xc z = xc_from_mpfr(x, y);
+        // derivatives of z_p with respect to c and z (dz equals l), for the shape estimate
+        dcdc = xc_mul(two, xc_add(xc_mul(z, dcdc), xc_mul(dc, dc)));
+        dcdz = xc_mul(two, xc_add(xc_mul(z, dcdz), xc_mul(dc, l)));
+        dc = xc_add(xc_mul(xc_mul(two, z), dc), one);
+        l = xc_mul(xc_mul(two, z), l);
+        if (l.re == 0 && l.im == 0) break;
+        b = xc_add(b, xc_div(one, l));
     }
     mpfr_clears(x, y, t0, t1, t2, cx, cy, (mpfr_ptr)0);
-    // size = 1 / (b l^2): log2 = -(log2|b| + 2 log2|l|)
-    double lb = 0.5 * log2(br * br + bi * bi);
-    double ll = 0.5 * log2(lr * lr + li * li) + le;
-    return -(lb + 2 * ll);
+    // e = -(dcdc / (2 dc) + dcdz / dz) / (dc dz) is near 0 for cardioids and near 1 for discs
+    xc e = xc_div(xc_add(xc_div(dcdc, xc_mul(two, dc)), xc_div(dcdz, l)), xc_mul(dc, l));
+    double er = -scale2(e.re, e.e), ei = -scale2(e.im, e.e);
+    *cardioid = er * er + ei * ei < (er - 1) * (er - 1) + ei * ei;
+    *angle = -(atan2(b.im, b.re) + 2 * atan2(l.im, l.re));
+    return -(xc_log2abs(b) + 2 * xc_log2abs(l));
 }

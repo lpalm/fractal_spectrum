@@ -299,8 +299,8 @@ final class AppModel {
         guard period > 0 else { return nil }
         let prec = max(view.center.precision, Int(-view.log2Radius) * 2 + 160)
         guard let n = Minibrot.nucleus(near: view.center, period: period, precision: prec) else { return nil }
-        let ls = Minibrot.log2Size(nucleus: n, period: period)
-        guard ls.isFinite, ls < view.log2Radius, n.minus(view.center).log2Abs < view.log2Radius + 2 else { return nil }
+        let (ls, _, cardioid) = Minibrot.size(nucleus: n, period: period)
+        guard cardioid, ls.isFinite, ls < view.log2Radius, n.minus(view.center).log2Abs < view.log2Radius + 2 else { return nil }
         return (Viewport(center: n, log2Radius: ls + log2(2.6), rotation: view.rotation), period, ls)
     }
 

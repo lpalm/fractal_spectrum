@@ -16,8 +16,12 @@ public enum Minibrot {
         return steps > 0 ? PlanePoint(re: re, im: im) : nil
     }
 
-    /// log2 of the minibrot's size (roughly its radius in the plane).
-    public static func log2Size(nucleus: PlanePoint, period: Int) -> Double {
-        fs_nucleus_log2size(nucleus.re.ptr, nucleus.im.ptr, period)
+    /// The component is approximately `nucleus + scale * c` for c in the whole set: log2 |scale| (roughly
+    /// its radius in the plane), arg scale, and whether it is a minibrot (cardioid) rather than a bulb.
+    public static func size(nucleus: PlanePoint, period: Int) -> (log2: Double, angle: Double, cardioid: Bool) {
+        var angle = 0.0
+        var cardioid: Int32 = 0
+        let l = fs_nucleus_size(nucleus.re.ptr, nucleus.im.ptr, period, &angle, &cardioid)
+        return (l, angle, cardioid != 0)
     }
 }

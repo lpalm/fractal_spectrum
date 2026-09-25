@@ -46,7 +46,9 @@ int fs_ref_escaped(const FSRefJob *job);
 // ---- Minibrot location (quadratic Mandelbrot) ----
 long fs_find_period(const FSHP *cre, const FSHP *cim, double log2r, long maxPeriod);
 long fs_find_nucleus(const FSHP *cre, const FSHP *cim, long period, long maxSteps, FSHP *outRe, FSHP *outIm);
-double fs_nucleus_log2size(const FSHP *cre, const FSHP *cim, long period);
+// log2 of the minibrot's size; *angle receives its rotation relative to the whole set and *cardioid
+// whether it is a minibrot (cardioid) rather than a bulb (disc).
+double fs_nucleus_size(const FSHP *cre, const FSHP *cim, long period, double *angle, int *cardioid);
 
 // ---- CPU oracle for verification ----
 // Iterates one pixel at full precision; returns the escape iteration or maxIter. With (jre, jim) the
