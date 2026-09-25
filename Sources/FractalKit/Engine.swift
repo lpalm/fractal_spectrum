@@ -64,9 +64,6 @@ public final class Engine: @unchecked Sendable {
         public var deep: Bool
         public var effectiveMaxIter: Int
         public var usedBLA: Bool { bla != nil }
-        public var pipelineInfo: String {
-            "\(pipeline.maxTotalThreadsPerThreadgroup) threads/tg, simd \(pipeline.threadExecutionWidth)"
-        }
     }
 
     /// Prepares a pass; returns nil while a needed reference orbit is still being computed.

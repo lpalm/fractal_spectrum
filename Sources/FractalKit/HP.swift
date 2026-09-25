@@ -47,12 +47,6 @@ public final class HPFloat: @unchecked Sendable {
         return FloatExp(m, e)
     }
 
-    public var floatExp: FloatExp {
-        var e = 0
-        let m = fs_hp_get_2exp(ptr, &e)
-        return FloatExp(m, e)
-    }
-
     /// self + (other - self) * t at `precision` bits.
     public func lerp(to other: HPFloat, _ t: Double, precision: Int) -> HPFloat {
         let r = fs_hp_new(precision)!
@@ -67,8 +61,6 @@ public final class HPFloat: @unchecked Sendable {
         return String(cString: c)
     }
 
-    /// Enough significant decimal digits to round-trip the stored precision.
-    public var fullString: String { string(digits: Int(Double(precision) * 0.30103) + 3) }
 }
 
 /// Point in the complex plane at arbitrary precision.
