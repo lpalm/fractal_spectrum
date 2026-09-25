@@ -449,8 +449,12 @@ struct QualitySection: View {
                 Spacer()
                 Button { model.scaleIterations(0.5) } label: { Image(systemName: "minus") }
                     .buttonStyle(.glass)
+                    .help("Halve iterations ([)")
+                    .accessibilityLabel("Halve iterations")
                 Button { model.scaleIterations(2) } label: { Image(systemName: "plus") }
                     .buttonStyle(.glass)
+                    .help("Double iterations (])")
+                    .accessibilityLabel("Double iterations")
                 Toggle("Auto", isOn: $model.iter.autoIterations)
                     .font(.system(size: 12, weight: .medium, design: .rounded))
                     .toggleStyle(.switch)
@@ -665,6 +669,7 @@ struct TopControls: View {
         .buttonStyle(.plain)
         .glassEffect(.regular.interactive(), in: Circle())
         .help(help)
+        .accessibilityLabel(help)
     }
 }
 
@@ -776,6 +781,7 @@ struct HelpOverlay: View {
                 Spacer()
                 Button { model.showHelp = false } label: { Image(systemName: "xmark") }
                     .buttonStyle(.glass)
+                    .accessibilityLabel("Close")
             }
             // two columns, so the list fits the smallest window
             HStack(alignment: .top, spacing: 32) {
