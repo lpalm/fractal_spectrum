@@ -12,6 +12,7 @@ final class ExportController {
         var id: String { rawValue }
     }
 
+    /// A named output size in pixels.
     struct Size: Hashable, Identifiable {
         let name: String
         let width: Int
@@ -60,6 +61,7 @@ final class ExportController {
 
     func cancel() { cancelToken.cancelled = true }
 
+    /// Remaining time of the running export, estimated from its progress so far.
     var eta: String {
         guard running, progress > 0.02 else { return "" }
         let elapsed = Date().timeIntervalSince(started)
@@ -74,18 +76,19 @@ final class ExportController {
         return min(300, max(10, (doublings * 0.45).rounded()))
     }
 
-    private static func askForURL(type: UTType, ext: String, in dir: FileManager.SearchPathDirectory) -> URL? {
+    private static func askForURL(type: UTType, ext: String, in directory: FileManager.SearchPathDirectory) -> URL? {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [type]
         panel.nameFieldStringValue = defaultName("Spectrum", ext)
-        panel.directoryURL = FileManager.default.urls(for: dir, in: .userDomainMask).first
+        panel.directoryURL = FileManager.default.urls(for: directory, in: .userDomainMask).first
         return panel.runModal() == .OK ? panel.url : nil
     }
 
+    /// "Prefix 2026-09-25 at 09.41.00.ext", like the system's screenshots.
     static func defaultName(_ prefix: String, _ ext: String) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
-        return "\(prefix) \(f.string(from: Date())).\(ext)"
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+        return "\(prefix) \(formatter.string(from: Date())).\(ext)"
     }
 
     func exportImage(model: AppModel, to preset: URL? = nil) {
@@ -95,18 +98,10 @@ final class ExportController {
         let job = Exporter.ImageJob(scene: FractalScene(formula: model.formula, view: model.camera.view, iter: iter),
                                     color: model.color, width: imageSize.width, height: imageSize.height,
                                     samples: imageSamples, colorOrigin: model.engine.colorOrigin)
-        begin("Rendering \(imageSize.width)×\(imageSize.height)")
-        let token = cancelToken
-        Task.detached(priority: .userInitiated) { [weak self] in
-            let exporter = Exporter()
-            do {
-                try exporter.exportImage(job, to: url) { p in
-                    DispatchQueue.main.async { self?.progress = p }
-                    return !token.cancelled
-                }
-                await self?.finish(url: url, message: "Saved \(url.lastPathComponent)")
-            } catch {
-                await self?.finish(url: nil, message: token.cancelled ? "Cancelled" : "Export failed: \(error.localizedDescription)")
+        run("Rendering \(imageSize.width)×\(imageSize.height)", to: url) { [weak self] exporter, token in
+            try exporter.exportImage(job, to: url) { fraction in
+                DispatchQueue.main.async { self?.progress = fraction }
+                return !token.cancelled
             }
         }
     }
@@ -119,18 +114,25 @@ final class ExportController {
                                     start: Viewport.home(for: model.formula), color: model.color,
                                     width: videoSize.width, height: videoSize.height, fps: fps, duration: duration,
                                     samples: videoSamples, codec: codec, spin: spin, colorCycle: cycleColors ? 0.05 : 0)
-        begin("Rendering \(job.frameCount) frames")
+        run("Rendering \(job.frameCount) frames", to: url) { [weak self] exporter, token in
+            try exporter.exportVideo(job, to: url) { fraction, image in
+                DispatchQueue.main.async {
+                    self?.progress = fraction
+                    if let image { self?.preview = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height)) }
+                }
+                return !token.cancelled
+            }
+        }
+    }
+
+    /// Runs an export off the main thread; `render` checks the token to stop early.
+    private func run(_ title: String, to url: URL,
+                     render: @escaping @Sendable (Exporter, CancelToken) throws -> Void) {
+        begin(title)
         let token = cancelToken
         Task.detached(priority: .userInitiated) { [weak self] in
-            let exporter = Exporter()
             do {
-                try exporter.exportVideo(job, to: url) { p, img in
-                    DispatchQueue.main.async {
-                        self?.progress = p
-                        if let img { self?.preview = NSImage(cgImage: img, size: NSSize(width: img.width, height: img.height)) }
-                    }
-                    return !token.cancelled
-                }
+                try render(Exporter(), token)
                 await self?.finish(url: url, message: "Saved \(url.lastPathComponent)")
             } catch {
                 await self?.finish(url: nil, message: token.cancelled ? "Cancelled" : "Export failed: \(error.localizedDescription)")
@@ -166,7 +168,7 @@ struct ExportSheet: View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
                 Text("Export")
-                    .font(.system(size: 22, weight: .bold, design: .rounded))
+                    .font(.rounded(22, .bold))
                 Spacer()
                 Picker("", selection: $export.kind) {
                     ForEach(ExportController.Kind.allCases) { Text($0.rawValue).tag($0) }
@@ -180,7 +182,7 @@ struct ExportSheet: View {
             if export.running || export.lastOutput != nil || !export.status.isEmpty { progressView }
             HStack {
                 Text(summary)
-                    .font(.system(size: 12, design: .rounded))
+                    .font(.rounded(12))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button("Close") { dismiss() }
@@ -274,9 +276,9 @@ struct ExportSheet: View {
             }
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Text(export.status).font(.system(size: 13, weight: .semibold, design: .rounded))
+                    Text(export.status).font(.rounded(13, .semibold))
                     Spacer()
-                    Text(export.eta).font(.system(size: 12, design: .rounded)).foregroundStyle(.secondary).monospacedDigit()
+                    Text(export.eta).font(.rounded(12)).foregroundStyle(.secondary).monospacedDigit()
                 }
                 if export.running {
                     ProgressView(value: export.progress)
@@ -298,7 +300,7 @@ final class CancelToken: @unchecked Sendable {
     private var value = false
 
     var cancelled: Bool {
-        get { lock.lock(); defer { lock.unlock() }; return value }
-        set { lock.lock(); value = newValue; lock.unlock() }
+        get { lock.withLock { value } }
+        set { lock.withLock { value = newValue } }
     }
 }

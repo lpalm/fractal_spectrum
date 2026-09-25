@@ -27,7 +27,7 @@ struct JuliaInset: View {
                 .frame(width: size.width, height: size.height)
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             Text(String(format: "c = %.5f %+.5fi", hover.re, hover.im))
-                .font(.system(size: 11, weight: .medium, design: .rounded))
+                .font(.rounded(11, .medium))
                 .monospacedDigit()
                 .padding(.horizontal, 4)
         }
@@ -47,24 +47,24 @@ struct JuliaPreviewView: NSViewRepresentable {
     func makeCoordinator() -> JuliaPreviewRenderer { JuliaPreviewRenderer() }
 
     func makeNSView(context: Context) -> MTKView {
-        let v = MTKView(frame: .zero, device: GPU.shared.device)
-        v.colorPixelFormat = .bgra8Unorm
-        v.framebufferOnly = false
-        v.isPaused = true
-        v.enableSetNeedsDisplay = true
-        (v.layer as? CAMetalLayer)?.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
-        v.delegate = context.coordinator
-        return v
+        let view = MTKView(frame: .zero, device: GPU.shared.device)
+        view.colorPixelFormat = .bgra8Unorm
+        view.framebufferOnly = false
+        view.isPaused = true
+        view.enableSetNeedsDisplay = true
+        (view.layer as? CAMetalLayer)?.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
+        view.delegate = context.coordinator
+        return view
     }
 
-    func updateNSView(_ v: MTKView, context: Context) {
-        var f = formula
-        f.julia = true
-        f.juliaRe = re
-        f.juliaIm = im
-        context.coordinator.scene = FractalScene(formula: f, view: Viewport.home(for: f), iter: IterationSettings())
+    func updateNSView(_ view: MTKView, context: Context) {
+        var julia = formula
+        julia.julia = true
+        julia.juliaRe = re
+        julia.juliaIm = im
+        context.coordinator.scene = FractalScene(formula: julia, view: Viewport.home(for: julia), iter: IterationSettings())
         context.coordinator.color = color
-        v.needsDisplay = true
+        view.needsDisplay = true
     }
 }
 
@@ -78,12 +78,14 @@ final class JuliaPreviewRenderer: NSObject, MTKViewDelegate {
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
     func draw(in view: MTKView) {
-        let w = Int(view.drawableSize.width), h = Int(view.drawableSize.height)
-        guard let scene, w > 0, h > 0, let drawable = view.currentDrawable else { return }
-        if frames?.width != w || frames?.height != h { frames = FrameRenderer(engine: engine, width: w, height: h) }
+        let width = Int(view.drawableSize.width), height = Int(view.drawableSize.height)
+        guard let scene, width > 0, height > 0, let drawable = view.currentDrawable else { return }
+        if frames?.width != width || frames?.height != height {
+            frames = FrameRenderer(engine: engine, width: width, height: height)
+        }
         frames?.render(scene: scene, color: color, samples: 2, into: drawable.texture, zoomed: nil)
-        guard let cb = engine.queue.makeCommandBuffer() else { return }
-        cb.present(drawable)
-        cb.commit()
+        guard let commandBuffer = engine.queue.makeCommandBuffer() else { return }
+        commandBuffer.present(drawable)
+        commandBuffer.commit()
     }
 }

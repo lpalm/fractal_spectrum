@@ -11,26 +11,26 @@ final class DevHooks {
     init(model: AppModel) {
         self.model = model
         token = DistributedNotificationCenter.default().addObserver(
-            forName: Notification.Name("com.lpalm.spectrum.command"), object: nil, queue: .main) { [weak self] n in
-            guard let cmd = n.object as? String else { return }
-            MainActor.assumeIsolated { self?.run(cmd) }
+            forName: Notification.Name("com.lpalm.spectrum.command"), object: nil, queue: .main) { [weak self] notification in
+            guard let command = notification.object as? String else { return }
+            MainActor.assumeIsolated { self?.run(command) }
         }
     }
 
-    private func run(_ cmd: String) {
-        let parts = cmd.split(separator: ":", maxSplits: 1).map(String.init)
+    private func run(_ command: String) {
+        let parts = command.split(separator: ":", maxSplits: 1).map(String.init)
         let verb = parts.first ?? ""
         let arg = parts.count > 1 ? parts[1] : ""
         switch verb {
         case "snapshot": snapshot(to: arg, withUI: true)
         case "canvas": snapshot(to: arg, withUI: false)
-        case "fly": if let l = Location.all.first(where: { $0.id == arg }) { model.fly(to: l) }
+        case "fly": if let location = Location.all.first(where: { $0.id == arg }) { model.fly(to: location) }
         case "jump":
-            if let l = Location.all.first(where: { $0.id == arg }), let v = l.viewport {
-                model.formula = l.formula
-                if let p = l.palette { model.color.palette = p }
+            if let location = Location.all.first(where: { $0.id == arg }), let view = location.viewport {
+                model.formula = location.formula
+                if let palette = location.palette { model.color.palette = palette }
                 model.renderer.snapColors = true
-                model.camera.jump(to: v)
+                model.camera.jump(to: view)
             }
         case "home": model.goHome()
         case "back": model.goBack()
@@ -40,10 +40,10 @@ final class DevHooks {
         case "tour": if arg == "off" { model.stopTour() } else { model.startTour() }
         case "zoom": model.zoomStep(Double(arg) ?? -1)
         case "palette": model.setPalette(Int(arg) ?? 0)
-        case "family": if let f = FractalFamily(rawValue: arg) { model.selectFamily(f) }
+        case "family": if let family = FractalFamily(rawValue: arg) { model.selectFamily(family) }
         case "ui": model.showUI = arg != "off"
         case "help": model.showHelp = arg == "on"
-        case "quality": if let q = Quality(rawValue: arg) { model.quality = q }
+        case "quality": if let quality = Quality(rawValue: arg) { model.quality = quality }
         case "autopilot": model.autopilot = arg == "on"
         case "julia": model.toggleJulia()
         case "iter": model.iter.maxIter = Int(arg) ?? model.iter.maxIter
@@ -109,13 +109,14 @@ final class DevHooks {
         case "settled":
             // writes "1" to the given file once the view is fully refined
             waitSettled(then: { try? "1".write(toFile: arg, atomically: true, encoding: .utf8) })
-        default: NSLog("DevHooks: unknown command %@", cmd)
+        default: NSLog("DevHooks: unknown command %@", command)
         }
     }
 
-    private func waitSettled(then f: @escaping () -> Void, tries: Int = 600) {
-        if model.renderer.isSettled || tries == 0 { f(); return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.waitSettled(then: f, tries: tries - 1) }
+    /// Runs `action` once the view is fully refined, or after 30 s.
+    private func waitSettled(then action: @escaping () -> Void, tries: Int = 600) {
+        if model.renderer.isSettled || tries == 0 { return action() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.waitSettled(then: action, tries: tries - 1) }
     }
 
     /// Saves the canvas, optionally with the interface drawn on top. Glass materials cannot be
@@ -147,6 +148,7 @@ final class DevHooks {
 }
 
 extension NSView {
+    /// The first view of the given type in this view's subtree, depth first.
     func firstSubview<T: NSView>(of type: T.Type) -> T? {
         for v in subviews {
             if let t = v as? T { return t }

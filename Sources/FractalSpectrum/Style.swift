@@ -8,3 +8,10 @@ extension View {
             .glassEffect(interactive ? .regular.interactive() : .regular, in: shape)
     }
 }
+
+extension Font {
+    /// The interface's typeface, SF Pro Rounded.
+    static func rounded(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        .system(size: size, weight: weight, design: .rounded)
+    }
+}

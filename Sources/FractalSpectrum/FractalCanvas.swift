@@ -1,6 +1,8 @@
 import AppKit
 import MetalKit
 import SwiftUI
+import simd
+import Carbon.HIToolbox
 import FractalKit
 
 /// Metal view that turns mouse, trackpad and keyboard input into camera motion.
@@ -46,7 +48,7 @@ final class FractalMTKView: MTKView {
         Float(window?.screen?.maximumExtendedDynamicRangeColorComponentValue ?? 1)
     }
 
-    /// Iteration budget per frame: most of the display's frame interval.
+    /// GPU time per frame for compute passes: most of the display's frame interval.
     private func updateFrameBudget() {
         let hz = Double(window?.screen?.maximumFramesPerSecond ?? 60)
         model?.renderer.frameBudgetMs = 1000 / max(hz, 30) * 0.72
@@ -60,7 +62,7 @@ final class FractalMTKView: MTKView {
         SIMD2(Double(p.x) * scale, Double(bounds.height - p.y) * scale)
     }
 
-    private func location(_ e: NSEvent) -> SIMD2<Double> { pixel(convert(e.locationInWindow, from: nil)) }
+    private func location(_ event: NSEvent) -> SIMD2<Double> { pixel(convert(event.locationInWindow, from: nil)) }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -69,16 +71,16 @@ final class FractalMTKView: MTKView {
                                        owner: self))
     }
 
-    override func mouseMoved(with e: NSEvent) { updateHover(e.modifierFlags) }
+    override func mouseMoved(with event: NSEvent) { updateHover(event.modifierFlags) }
 
-    override func mouseExited(with e: NSEvent) {
+    override func mouseExited(with event: NSEvent) {
         model?.juliaHover = nil
         model?.orbitHover = nil
     }
 
-    override func flagsChanged(with e: NSEvent) {
-        super.flagsChanged(with: e)
-        updateHover(e.modifierFlags)
+    override func flagsChanged(with event: NSEvent) {
+        super.flagsChanged(with: event)
+        updateHover(event.modifierFlags)
     }
 
     private func updateHover(_ flags: NSEvent.ModifierFlags) {
@@ -112,84 +114,85 @@ final class FractalMTKView: MTKView {
         model.juliaHover = JuliaHover(point: CGPoint(x: p.x, y: bounds.height - p.y), re: c.re.doubleValue, im: c.im.doubleValue)
     }
 
-    override func scrollWheel(with e: NSEvent) {
+    override func scrollWheel(with event: NSEvent) {
         guard let model else { return }
         let (w, h) = pixelSize
-        let zoomModifier = e.modifierFlags.contains(.command) || e.modifierFlags.contains(.option)
-        if e.modifierFlags.contains(.option) {
+        let zoomModifier = event.modifierFlags.contains(.command) || event.modifierFlags.contains(.option)
+        if event.modifierFlags.contains(.option) {
             hoverSuppressed = true
             model.juliaHover = nil
         }
-        if e.hasPreciseScrollingDeltas && !zoomModifier {
+        if event.hasPreciseScrollingDeltas && !zoomModifier {
             // trackpad: two-finger scroll pans, momentum included
-            model.camera.pan(pixels: SIMD2(Double(e.scrollingDeltaX), Double(e.scrollingDeltaY)) * scale, width: w, height: h)
+            model.camera.pan(pixels: SIMD2(Double(event.scrollingDeltaX), Double(event.scrollingDeltaY)) * scale, width: w, height: h)
             model.userInteracted()
         } else {
-            let dy = e.hasPreciseScrollingDeltas ? Double(e.scrollingDeltaY) * 0.02 : Double(e.scrollingDeltaY) * 0.18
-            model.camera.zoom(log2Factor: -dy, at: location(e), width: w, height: h, animated: true)
+            let dy = event.hasPreciseScrollingDeltas ? Double(event.scrollingDeltaY) * 0.02 : Double(event.scrollingDeltaY) * 0.18
+            model.camera.zoom(log2Factor: -dy, at: location(event), width: w, height: h, animated: true)
             model.userInteracted()
         }
     }
 
-    override func magnify(with e: NSEvent) {
+    override func magnify(with event: NSEvent) {
         guard let model else { return }
         let (w, h) = pixelSize
-        model.camera.zoom(log2Factor: -log2(max(0.2, 1 + Double(e.magnification))), at: location(e),
+        model.camera.zoom(log2Factor: -log2(max(0.2, 1 + Double(event.magnification))), at: location(event),
                           width: w, height: h, animated: false)
         model.userInteracted()
     }
 
-    override func rotate(with e: NSEvent) {
+    override func rotate(with event: NSEvent) {
         guard let model else { return }
-        model.camera.rotate(by: Double(e.rotation) * .pi / 180)
+        model.camera.rotate(by: Double(event.rotation) * .pi / 180)
         model.userInteracted()
     }
 
-    override func mouseDown(with e: NSEvent) {
+    override func mouseDown(with event: NSEvent) {
         guard let model else { return }
         window?.makeFirstResponder(self)
-        if e.clickCount == 2 {
+        if event.clickCount == 2 {
             let (w, h) = pixelSize
-            let f = e.modifierFlags.contains(.option) ? 2.0 : -2.0
-            model.camera.zoom(log2Factor: f, at: location(e), width: w, height: h, animated: true)
+            let f = event.modifierFlags.contains(.option) ? 2.0 : -2.0
+            model.camera.zoom(log2Factor: f, at: location(event), width: w, height: h, animated: true)
             model.userInteracted()
             return
         }
-        if e.modifierFlags.contains(.option) && model.formula.family == .mandelbrot && !model.formula.julia {
-            model.pickJulia(atPixel: location(e))
+        if event.modifierFlags.contains(.option) && model.formula.family == .mandelbrot && !model.formula.julia {
+            model.pickJulia(atPixel: location(event))
             return
         }
         model.camera.stopMotion()
         model.camera.cancelFlight()
         dragging = true
-        lastDrag = (e.locationInWindow, e.timestamp)
+        lastDrag = (event.locationInWindow, event.timestamp)
         dragVelocity = .zero
     }
 
-    override func mouseDragged(with e: NSEvent) {
+    override func mouseDragged(with event: NSEvent) {
         guard let model, dragging, let last = lastDrag else { return }
         let (w, h) = pixelSize
-        let d = SIMD2(Double(e.locationInWindow.x - last.point.x), Double(last.point.y - e.locationInWindow.y)) * scale
+        let d = SIMD2(Double(event.locationInWindow.x - last.point.x), Double(last.point.y - event.locationInWindow.y)) * scale
         model.camera.pan(pixels: d, width: w, height: h)
-        let dt = max(e.timestamp - last.time, 1e-3)
+        let dt = max(event.timestamp - last.time, 1e-3)
         dragVelocity = dragVelocity * 0.5 + (d / dt) * 0.5
-        lastDrag = (e.locationInWindow, e.timestamp)
+        lastDrag = (event.locationInWindow, event.timestamp)
         model.userInteracted()
     }
 
-    override func mouseUp(with e: NSEvent) {
+    override func mouseUp(with event: NSEvent) {
         guard let model, dragging else { return }
         dragging = false
-        if let last = lastDrag, e.timestamp - last.time < 0.06, simdLength(dragVelocity) > 200 {
+        // a release while still moving flings the content
+        if let last = lastDrag, event.timestamp - last.time < 0.06, simd_length(dragVelocity) > 200 {
             model.camera.fling(velocity: dragVelocity)
         }
         lastDrag = nil
     }
 
-    override func rightMouseDown(with e: NSEvent) {
+    override func rightMouseDown(with event: NSEvent) {
         guard let model else { return }
         let (w, h) = pixelSize
-        model.camera.zoom(log2Factor: 2, at: location(e), width: w, height: h, animated: true)
+        model.camera.zoom(log2Factor: 2, at: location(event), width: w, height: h, animated: true)
         model.userInteracted()
     }
 
@@ -201,32 +204,26 @@ final class FractalMTKView: MTKView {
         model.renderer.hdrHeadroom = wantHDR ? edrHeadroom : nil
     }
 
-    override func keyDown(with e: NSEvent) {
+    override func keyDown(with event: NSEvent) {
         guard let model else { return }
         let (w, h) = pixelSize
-        let c = SIMD2(Double(w), Double(h)) * 0.5
-        let panStep = Double(min(w, h)) * 0.12
-        switch e.keyCode {
-        case 123: model.camera.fling(velocity: SIMD2(panStep * 6, 0))      // left
-        case 124: model.camera.fling(velocity: SIMD2(-panStep * 6, 0))     // right
-        case 125: model.camera.fling(velocity: SIMD2(0, -panStep * 6))     // down
-        case 126: model.camera.fling(velocity: SIMD2(0, panStep * 6))      // up
-        case 53:                                                           // escape
-            if model.showHelp { model.showHelp = false } else { super.keyDown(with: e) }
+        let centre = SIMD2(Double(w), Double(h)) * 0.5
+        let flingSpeed = Double(min(w, h)) * 0.72   // pixels per second
+        switch Int(event.keyCode) {
+        case kVK_LeftArrow: model.camera.fling(velocity: SIMD2(flingSpeed, 0))
+        case kVK_RightArrow: model.camera.fling(velocity: SIMD2(-flingSpeed, 0))
+        case kVK_DownArrow: model.camera.fling(velocity: SIMD2(0, -flingSpeed))
+        case kVK_UpArrow: model.camera.fling(velocity: SIMD2(0, flingSpeed))
+        case kVK_Escape:
+            if model.showHelp { model.showHelp = false } else { super.keyDown(with: event) }
             return
         default:
-            switch e.charactersIgnoringModifiers?.lowercased() {
-            case "=", "+": model.camera.zoom(log2Factor: -1, at: c, width: w, height: h, animated: true)
-            case "-", "_": model.camera.zoom(log2Factor: 1, at: c, width: w, height: h, animated: true)
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "=", "+": model.camera.zoom(log2Factor: -1, at: centre, width: w, height: h, animated: true)
+            case "-", "_": model.camera.zoom(log2Factor: 1, at: centre, width: w, height: h, animated: true)
             case "q": model.camera.rotate(by: .pi / 12, animated: true)
             case "e": model.camera.rotate(by: -.pi / 12, animated: true)
             case "h": model.goHome()
-            case "m":
-                model.findMinibrot()
-                return
-            case "b":
-                model.addBookmark()
-                return
             case " ": model.showUI.toggle()
             case "j": model.toggleJulia()
             case "c": model.cyclePalette(1)
@@ -236,28 +233,19 @@ final class FractalMTKView: MTKView {
             case "l": model.toggleLighting()
             case "f": window?.toggleFullScreen(nil)
             case "p": model.autopilot.toggle()
-            case ",", "<":
-                model.pilot.speed = max(0.25, model.pilot.speed / 1.4)
-                model.show(String(format: "Autopilot speed %.1f×", model.pilot.speed))
-                return
-            case ".", ">":
-                model.pilot.speed = min(8, model.pilot.speed * 1.4)
-                model.show(String(format: "Autopilot speed %.1f×", model.pilot.speed))
-                return
-            case "t":
-                if model.touring { model.stopTour() } else { model.startTour() }
-                return
-            case "?", "/":
-                model.showHelp.toggle()
-                return
-            default: super.keyDown(with: e)
+            // the keys below leave the tour and the autopilot running
+            case "m": model.findMinibrot(); return
+            case "b": model.addBookmark(); return
+            case ",", "<": model.scaleAutopilotSpeed(1 / 1.4); return
+            case ".", ">": model.scaleAutopilotSpeed(1.4); return
+            case "t": model.toggleTour(); return
+            case "?", "/": model.showHelp.toggle(); return
+            default: super.keyDown(with: event)
             }
         }
         model.userInteracted()
     }
 }
-
-@inline(__always) func simdLength(_ v: SIMD2<Double>) -> Double { (v * v).sum().squareRoot() }
 
 /// SwiftUI wrapper around the Metal canvas.
 struct FractalCanvas: NSViewRepresentable {

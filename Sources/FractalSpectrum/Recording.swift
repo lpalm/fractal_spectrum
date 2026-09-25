@@ -17,8 +17,9 @@ final class LiveRecorder: @unchecked Sendable {
     private let textureCache: CVMetalTextureCache
     /// Serialises the writer, which is not thread-safe.
     private let queue = DispatchQueue(label: "recording")
-    private let start = CACurrentMediaTime()
-    private var last = CMTime.negativeInfinity
+    private let startTime = CACurrentMediaTime()
+    /// Presentation time of the last appended frame.
+    private var lastTime = CMTime.negativeInfinity
 
     init(url: URL, drawable: SIMD2<Int>) throws {
         self.url = url
@@ -50,36 +51,38 @@ final class LiveRecorder: @unchecked Sendable {
     /// A pixel buffer to draw the next frame into, with its texture; nil while the encoder is busy.
     func nextFrame() -> (buffer: CVPixelBuffer, texture: CVMetalTexture)? {
         guard input.isReadyForMoreMediaData, let pool = adaptor.pixelBufferPool else { return nil }
-        var pb: CVPixelBuffer?
-        CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb)
-        var tex: CVMetalTexture?
-        guard let pb, CVMetalTextureCacheCreateTextureFromImage(nil, textureCache, pb, nil, .bgra8Unorm, width, height, 0, &tex)
-                == kCVReturnSuccess, let tex else { return nil }
-        return (pb, tex)
+        var pixelBuffer: CVPixelBuffer?
+        CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pixelBuffer)
+        var texture: CVMetalTexture?
+        guard let pixelBuffer,
+              CVMetalTextureCacheCreateTextureFromImage(nil, textureCache, pixelBuffer, nil, .bgra8Unorm, width, height, 0,
+                                                        &texture) == kCVReturnSuccess,
+              let texture else { return nil }
+        return (pixelBuffer, texture)
     }
 
     /// Appends a frame whose GPU work has completed, presented at `time` (CACurrentMediaTime).
     func append(_ buffer: CVPixelBuffer, at time: CFTimeInterval) {
         queue.async { [self] in
-            let t = CMTime(seconds: time - start, preferredTimescale: 6000)
-            guard t > last, input.isReadyForMoreMediaData else { return }
+            let t = CMTime(seconds: time - startTime, preferredTimescale: 6000)
+            guard t > lastTime, input.isReadyForMoreMediaData else { return }
             // the movie starts with its first frame (a session from 0 would open with black)
-            if last == .negativeInfinity { writer.startSession(atSourceTime: t) }
-            if adaptor.append(buffer, withPresentationTime: t) { last = t }
+            if lastTime == .negativeInfinity { writer.startSession(atSourceTime: t) }
+            if adaptor.append(buffer, withPresentationTime: t) { lastTime = t }
         }
     }
 
     /// Ends the movie at the current time (holding the last frame) and reports whether it was written;
     /// a movie without frames (its session never started) is removed.
     func finish(completion: @escaping @Sendable (Bool) -> Void) {
-        let end = CMTime(seconds: CACurrentMediaTime() - start, preferredTimescale: 6000)
+        let end = CMTime(seconds: CACurrentMediaTime() - startTime, preferredTimescale: 6000)
         queue.async { [self] in
             input.markAsFinished()
-            writer.endSession(atSourceTime: max(end, last))
+            writer.endSession(atSourceTime: max(end, lastTime))
             writer.finishWriting { [writer, url] in
-                let ok = writer.status == .completed
-                if !ok { try? FileManager.default.removeItem(at: url) }
-                completion(ok)
+                let written = writer.status == .completed
+                if !written { try? FileManager.default.removeItem(at: url) }
+                completion(written)
             }
         }
     }

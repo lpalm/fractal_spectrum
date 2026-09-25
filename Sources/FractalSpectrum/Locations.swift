@@ -6,26 +6,32 @@ struct Location: Identifiable, Hashable, Codable {
     let id: String
     let name: String
     let formula: Formula
+    /// The centre as decimal strings, exact at any depth.
     let re: String
     let im: String
     /// log10 of the magnification.
     let zoom: Double
+    /// In degrees.
     var rotation: Double = 0
+    /// Palette and iteration limit to show the place with, if it has its own.
     var palette: Int?
     var maxIter: Int?
 
+    /// The view, or nil when the coordinates do not parse.
     var viewport: Viewport? {
-        let prec = max(64, Int(zoom * 3.33) + 96)
-        guard let c = PlanePoint(re: re, im: im, precision: prec) else { return nil }
-        return Viewport(center: c, log2Radius: 1 - zoom / log10(2.0), rotation: rotation * .pi / 180)
+        let bits = max(64, Int(zoom * 3.33) + 96)   // a little over log2(10) bits per digit
+        guard let center = PlanePoint(re: re, im: im, precision: bits) else { return nil }
+        return Viewport(center: center, log2Radius: 1 - zoom / log10(2.0), rotation: rotation * .pi / 180)
     }
 
+    /// Magnification for a tile's badge: "40×" or "10³⁰".
     var depthText: String {
         zoom < 3 ? String(format: "%.0f×", pow(10, zoom)) : ScaleFact.power(Int(zoom.rounded()))
     }
 
+    // places are identified by their id
     static func == (a: Location, b: Location) -> Bool { a.id == b.id }
-    func hash(into h: inout Hasher) { h.combine(id) }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
 
     /// Captures a view with enough digits to restore it exactly.
     init(id: String, name: String, formula: Formula, view: Viewport, palette: Int?, maxIter: Int?) {
@@ -56,7 +62,7 @@ struct Location: Identifiable, Hashable, Codable {
 }
 
 extension Location {
-    static let mandel = Formula()
+    private static let mandel = Formula()
 
     static let all: [Location] = [
         Location(id: "seahorse", name: "Seahorse Valley", formula: mandel,

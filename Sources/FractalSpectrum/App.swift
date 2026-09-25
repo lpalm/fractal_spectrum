@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import FractalKit
 
+/// The app: one window with the explorer, and its menus.
 @main
 struct FractalSpectrumApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
@@ -18,16 +19,10 @@ struct FractalSpectrumApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {}
             CommandGroup(replacing: .saveItem) {
-                Button("Export Image…") {
-                    model.export.kind = .image
-                    model.showExport = true
-                }
-                .keyboardShortcut("s", modifiers: .command)
-                Button("Export Zoom Video…") {
-                    model.export.kind = .video
-                    model.showExport = true
-                }
-                .keyboardShortcut("e", modifiers: .command)
+                Button("Export Image…") { model.openExport(.image) }
+                    .keyboardShortcut("s", modifiers: .command)
+                Button("Export Zoom Video…") { model.openExport(.video) }
+                    .keyboardShortcut("e", modifiers: .command)
                 Button(model.recordingSince == nil ? "Start Recording" : "Stop Recording") { model.toggleRecording() }
                     .keyboardShortcut("r", modifiers: .command)
             }
@@ -49,8 +44,8 @@ struct FractalSpectrumApp: App {
                 Button("Copy Coordinates") { model.copyCoordinates() }.keyboardShortcut("c", modifiers: [.command, .shift])
             }
             CommandMenu("Fractal") {
-                ForEach(FractalFamily.allCases) { f in
-                    Button(f.displayName) { model.selectFamily(f) }
+                ForEach(FractalFamily.allCases) { family in
+                    Button(family.displayName) { model.selectFamily(family) }
                 }
                 Divider()
                 Button(model.formula.julia ? "Back to Parameter Plane" : "Julia Set of View Centre") { model.toggleJulia() }
@@ -64,6 +59,7 @@ struct FractalSpectrumApp: App {
     }
 }
 
+/// Launch in dark appearance, and a clean ending for recordings and exports on quit.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var model: AppModel?
 
