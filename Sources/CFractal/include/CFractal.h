@@ -16,12 +16,9 @@ FSHP *fs_hp_new(long prec);
 FSHP *fs_hp_clone(const FSHP *src, long prec);
 void fs_hp_free(FSHP *h);
 long fs_hp_prec(const FSHP *h);
-void fs_hp_set_prec(FSHP *h, long prec);            // keeps the value, rounded
 int fs_hp_set_str(FSHP *h, const char *s);           // decimal string; returns 0 on success
-void fs_hp_set(FSHP *h, const FSHP *src);
 void fs_hp_set_d(FSHP *h, double d);
 void fs_hp_add_2exp(FSHP *h, double m, long e);     // h += m * 2^e
-double fs_hp_get_2exp(const FSHP *h, long *e);       // h = ret * 2^e, |ret| in [0.5, 1) or 0
 double fs_hp_get_d(const FSHP *h);
 double fs_hp_diff_2exp(const FSHP *a, const FSHP *b, long *e);   // a - b = ret * 2^e
 void fs_hp_lerp(FSHP *out, const FSHP *a, const FSHP *b, double t);   // out = a + (b - a) t
@@ -44,7 +41,6 @@ void fs_ref_free(FSRefJob *job);
 // Writes points [count, newCount) into zf/zx; returns the new point count. *progress tracks the count.
 long fs_ref_run(FSRefJob *job, long target, fs_float2 *zf, FSRefExt *zx, double bailout2,
                 volatile const int *cancel, volatile long *progress);
-long fs_ref_count(const FSRefJob *job);
 int fs_ref_escaped(const FSRefJob *job);
 
 // ---- Minibrot location (quadratic Mandelbrot) ----

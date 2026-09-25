@@ -50,7 +50,6 @@ void fs_ref_free(FSRefJob *j) {
     free(j);
 }
 
-long fs_ref_count(const FSRefJob *j) { return j->count; }
 int fs_ref_escaped(const FSRefJob *j) { return j->escaped; }
 
 static inline float flush(double v) {

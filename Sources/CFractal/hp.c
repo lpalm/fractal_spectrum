@@ -25,14 +25,7 @@ void fs_hp_free(FSHP *h) {
 
 long fs_hp_prec(const FSHP *h) { return (long)mpfr_get_prec(h->v); }
 
-void fs_hp_set_prec(FSHP *h, long prec) {
-    if (prec < MPFR_PREC_MIN) prec = MPFR_PREC_MIN;
-    mpfr_prec_round(h->v, prec, MPFR_RNDN);
-}
-
 int fs_hp_set_str(FSHP *h, const char *s) { return mpfr_set_str(h->v, s, 10, MPFR_RNDN); }
-
-void fs_hp_set(FSHP *h, const FSHP *src) { mpfr_set(h->v, src->v, MPFR_RNDN); }
 
 void fs_hp_set_d(FSHP *h, double d) { mpfr_set_d(h->v, d, MPFR_RNDN); }
 
@@ -44,14 +37,6 @@ void fs_hp_add_2exp(FSHP *h, double m, long e) {
     mpfr_mul_2si(t, t, e, MPFR_RNDN);
     mpfr_add(h->v, h->v, t, MPFR_RNDN);
     mpfr_clear(t);
-}
-
-double fs_hp_get_2exp(const FSHP *h, long *e) {
-    if (mpfr_zero_p(h->v)) {
-        *e = 0;
-        return 0;
-    }
-    return mpfr_get_d_2exp(e, h->v, MPFR_RNDN);
 }
 
 double fs_hp_get_d(const FSHP *h) { return mpfr_get_d(h->v, MPFR_RNDN); }
