@@ -1,0 +1,769 @@
+// Escape-time kernels: direct float iteration for shallow views, perturbation with bilinear
+// approximation (BLA) and rebasing for deep views, extended-range floats beyond 1e-18.
+// ShaderTypes.h is prepended to this source at load time.
+
+#include <metal_stdlib>
+using namespace metal;
+
+constant int FORMULA [[function_constant(0)]];
+constant int POWER [[function_constant(1)]];
+constant bool JULIA [[function_constant(2)]];
+constant bool USE_BLA [[function_constant(3)]];
+constant bool WITH_DER [[function_constant(4)]];
+constant bool DEEP [[function_constant(5)]];
+
+constant bool IS_MANDEL = FORMULA == FS_FORMULA_MANDEL;
+
+// One G-buffer sample.
+struct GSample {
+    uint n;         // escape iteration or FS_INTERIOR
+    float frac;     // smooth iteration fraction
+    float de;       // log2 of the distance estimate in samples
+    half2 normal;   // unit gradient direction of the escape potential
+};
+
+// ---------------------------------------------------------------------------------------------
+// Small math helpers
+
+inline float2 cmul(float2 a, float2 b) { return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
+inline float2 csqr(float2 a) { return float2(a.x * a.x - a.y * a.y, 2.0f * a.x * a.y); }
+inline float2 matvec(float4 A, float2 v) { return float2(A.x * v.x + A.y * v.y, A.z * v.x + A.w * v.y); }
+inline float4 matmul(float4 A, float4 B) {
+    return float4(A.x * B.x + A.y * B.z, A.x * B.y + A.y * B.w, A.z * B.x + A.w * B.z, A.z * B.y + A.w * B.w);
+}
+inline float2 mattvec(float4 A, float2 v) { return float2(A.x * v.x + A.z * v.y, A.y * v.x + A.w * v.y); }
+
+// Binary exponent k with x = f * 2^k, |f| in [0.5, 1) for normal x.
+inline int expo(float x) { return int((as_type<uint>(x) >> 23) & 0xffu) - 126; }
+
+// 2^k for k in [-126, 127].
+inline float p2(int k) { return as_type<float>(uint(k + 127) << 23); }
+
+inline float scl(float v, int k) {
+    k = clamp(k, -252, 252);
+    int h = k >> 1;
+    return v * p2(h) * p2(k - h);
+}
+inline float2 scl(float2 v, int k) {
+    k = clamp(k, -252, 252);
+    int h = k >> 1;
+    return v * p2(h) * p2(k - h);
+}
+inline float4 scl(float4 v, int k) {
+    k = clamp(k, -252, 252);
+    int h = k >> 1;
+    return v * p2(h) * p2(k - h);
+}
+
+// |c + d| - |c| without cancellation.
+inline float diffabs(float c, float d) {
+    float cd = c + d;
+    if (c >= 0.0f) return cd >= 0.0f ? d : -(2.0f * c + d);
+    return cd > 0.0f ? (2.0f * c + d) : -d;
+}
+
+inline float binom(int n, int k) {
+    float r = 1.0f;
+    for (int i = 1; i <= k; i++) r = r * float(n - k + i) / float(i);
+    return r;
+}
+
+// Complex value m * 2^e with a shared exponent.
+struct fx {
+    float2 m;
+    int e;
+};
+
+inline fx fx_norm(float2 m, int e) {
+    float a = max(abs(m.x), abs(m.y));
+    if (a == 0.0f) return fx{float2(0.0f), FS_ZERO_EXP};
+    int k = expo(a);
+    return fx{scl(m, -k), e + k};
+}
+
+inline fx fx_add(fx a, fx b) {
+    int e = max(a.e, b.e);
+    return fx_norm(scl(a.m, a.e - e) + scl(b.m, b.e - e), e);
+}
+
+// Real value m * 2^e.
+struct rx {
+    float m;
+    int e;
+};
+
+inline rx rx_norm(float m, int e) {
+    if (m == 0.0f) return rx{0.0f, FS_ZERO_EXP};
+    int k = expo(abs(m));
+    return rx{scl(m, -k), e + k};
+}
+
+inline rx rx_add(rx a, rx b) {
+    int e = max(a.e, b.e);
+    return rx_norm(scl(a.m, a.e - e) + scl(b.m, b.e - e), e);
+}
+
+inline rx rx_mul(rx a, rx b) { return rx_norm(a.m * b.m, a.e + b.e); }
+
+// diffabs for extended-range operands.
+inline rx rx_diffabs(rx c, rx d) {
+    if (c.m == 0.0f) return rx{abs(d.m), d.e};
+    if (c.e - 1 >= d.e) return rx{c.m > 0.0f ? d.m : -d.m, d.e};   // |c| >= |d|: no sign change
+    int e = max(c.e, d.e);
+    return rx_norm(diffabs(scl(c.m, c.e - e), scl(d.m, d.e - e)), e);
+}
+
+inline fx fx_from_rx(rx x, rx y) {
+    int e = max(x.e, y.e);
+    return fx_norm(float2(scl(x.m, x.e - e), scl(y.m, y.e - e)), e);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Formula-specific pieces
+
+// Jacobian of one iteration at z as a row-major 2x2 matrix.
+inline float4 jacobian(float2 z) {
+    if (IS_MANDEL) {
+        float2 a = float2(1.0f, 0.0f);
+        for (int k = 1; k < POWER; k++) a = cmul(a, z);
+        a *= float(POWER);
+        return float4(a.x, -a.y, a.y, a.x);
+    }
+    if (FORMULA == FS_FORMULA_TRICORN) return float4(2.0f * z.x, -2.0f * z.y, -2.0f * z.y, -2.0f * z.x);
+    if (FORMULA == FS_FORMULA_SHIP) {
+        float s = z.x * z.y >= 0.0f ? 2.0f : -2.0f;
+        return float4(2.0f * z.x, -2.0f * z.y, s * z.y, s * z.x);
+    }
+    float s = z.x * z.x - z.y * z.y >= 0.0f ? 2.0f : -2.0f;   // Celtic
+    return float4(s * z.x, -s * z.y, 2.0f * z.y, 2.0f * z.x);
+}
+
+// Full iteration z -> f(z) (without the + c).
+inline float2 fz(float2 z) {
+    if (IS_MANDEL) {
+        if (POWER == 2) return csqr(z);
+        float2 a = z;
+        for (int k = 1; k < POWER; k++) a = cmul(a, z);
+        return a;
+    }
+    float2 s = csqr(z);
+    if (FORMULA == FS_FORMULA_TRICORN) return float2(s.x, -s.y);
+    if (FORMULA == FS_FORMULA_SHIP) return float2(s.x, abs(s.y));
+    return float2(abs(s.x), s.y);
+}
+
+// Perturbation: f(Z + d) - f(Z) in plain float.
+inline float2 pert(float2 Z, float2 d) {
+    if (IS_MANDEL) {
+        if (POWER == 2) return cmul(2.0f * Z + d, d);
+        float2 zp[9];
+        zp[0] = float2(1.0f, 0.0f);
+        for (int i = 1; i < POWER; i++) zp[i] = cmul(zp[i - 1], Z);
+        float2 acc = float2(1.0f, 0.0f);
+        for (int k = POWER - 1; k >= 1; k--) acc = cmul(acc, d) + binom(POWER, k) * zp[POWER - k];
+        return cmul(acc, d);
+    }
+    float X = Z.x, Y = Z.y, x = d.x, y = d.y;
+    float re = (2.0f * X + x) * x - (2.0f * Y + y) * y;
+    float im = 2.0f * (X * y + x * Y + x * y);
+    if (FORMULA == FS_FORMULA_TRICORN) return float2(re, -im);
+    if (FORMULA == FS_FORMULA_SHIP) return float2(re, 2.0f * diffabs(X * Y, X * y + x * Y + x * y));
+    return float2(diffabs(X * X - Y * Y, re), im);
+}
+
+// Perturbation f(Z + d) - f(Z) in extended range, d = w.
+inline fx pert_ext(FSRefExt Zr, fx w) {
+    float2 Zm = Zr.m;
+    int Ze = Zr.e;
+    if (IS_MANDEL) {
+        // sum_{k=1..p} C(p,k) Z^{p-k} d^k
+        float2 zp[9];
+        zp[0] = float2(1.0f, 0.0f);
+        for (int i = 1; i < POWER; i++) zp[i] = cmul(zp[i - 1], Zm);
+        fx acc = fx{float2(0.0f), FS_ZERO_EXP};
+        float2 wk = float2(1.0f, 0.0f);
+        for (int k = 1; k <= POWER; k++) {
+            wk = cmul(wk, w.m);
+            fx term = fx{binom(POWER, k) * cmul(zp[POWER - k], wk), (POWER - k) * Ze + k * w.e};
+            acc = fx_add(acc, term);
+        }
+        return acc;
+    }
+    rx X = rx{Zm.x, Ze}, Y = rx{Zm.y, Ze}, x = rx{w.m.x, w.e}, y = rx{w.m.y, w.e};
+    // re = 2Xx - 2Yy + x^2 - y^2 ; im = 2(Xy + xY + xy)
+    rx lin_re = rx_norm(2.0f * (Zm.x * w.m.x - Zm.y * w.m.y), Ze + w.e);
+    rx quad_re = rx_norm(w.m.x * w.m.x - w.m.y * w.m.y, 2 * w.e);
+    rx re = rx_add(lin_re, quad_re);
+    rx cross = rx_add(rx_norm(Zm.x * w.m.y + w.m.x * Zm.y, Ze + w.e), rx_norm(w.m.x * w.m.y, 2 * w.e));
+    if (FORMULA == FS_FORMULA_TRICORN) return fx_from_rx(re, rx{-2.0f * cross.m, cross.e});
+    if (FORMULA == FS_FORMULA_SHIP) {
+        rx XY = rx_mul(X, Y);
+        rx im = rx_diffabs(XY, cross);
+        return fx_from_rx(re, rx{2.0f * im.m, im.e});
+    }
+    rx XX = rx_add(rx_mul(X, X), rx{-rx_mul(Y, Y).m, rx_mul(Y, Y).e});
+    rx nre = rx_diffabs(XX, re);
+    (void)x;
+    (void)y;
+    return fx_from_rx(nre, rx{2.0f * cross.m, cross.e});
+}
+
+// ---------------------------------------------------------------------------------------------
+// Derivative bookkeeping: J * 2^je with J complex (Mandelbrot family, in .xy) or a 2x2 matrix.
+
+struct Der {
+    float4 J;
+    int e;
+};
+
+inline Der der_init() {
+    Der d;
+    d.J = JULIA ? float4(1.0f, 0.0f, 0.0f, 1.0f) : float4(0.0f);
+    d.e = 0;
+    return d;
+}
+
+inline Der der_renorm(Der d) {
+    float a = max(max(abs(d.J.x), abs(d.J.y)), max(abs(d.J.z), abs(d.J.w)));
+    if (a > 0x1p40f || (a < 0x1p-40f && a > 0.0f)) {
+        int k = expo(a);
+        d.J = scl(d.J, -k);
+        d.e += k;
+    }
+    return d;
+}
+
+// One full iteration at point z: J' = M(z) J + I.
+inline Der der_step(Der d, float2 z) {
+    float4 M = jacobian(z);
+    if (IS_MANDEL) {
+        float2 j = cmul(float2(M.x, M.z), d.J.xy);
+        if (!JULIA) j.x += scl(1.0f, -d.e);
+        d.J = float4(j, 0.0f, 0.0f);
+    } else {
+        d.J = matmul(M, d.J);
+        if (!JULIA) d.J += scl(float4(1.0f, 0.0f, 0.0f, 1.0f), -d.e);
+    }
+    return der_renorm(d);
+}
+
+// BLA step: J' = A J + B.
+inline Der der_bla(Der d, FSBLAEntry E) {
+    if (IS_MANDEL) {
+        float2 j = cmul(float2(E.A.x, E.A.z), d.J.xy);
+        int e = E.Ae + d.e;
+        if (!JULIA) {
+            int ne = max(e, E.Be);
+            j = scl(j, e - ne) + scl(float2(E.B.x, E.B.z), E.Be - ne);
+            e = ne;
+        }
+        d.J = float4(j, 0.0f, 0.0f);
+        d.e = e;
+    } else {
+        float4 j = matmul(E.A, d.J);
+        int e = E.Ae + d.e;
+        if (!JULIA) {
+            int ne = max(e, E.Be);
+            j = scl(j, e - ne) + scl(E.B, E.Be - ne);
+            e = ne;
+        }
+        d.J = j;
+        d.e = e;
+    }
+    float a = max(max(abs(d.J.x), abs(d.J.y)), max(abs(d.J.z), abs(d.J.w)));
+    if (a > 0.0f) {
+        int k = expo(a);
+        d.J = scl(d.J, -k);
+        d.e += k;
+    }
+    return d;
+}
+
+// Writes the final sample: smooth iteration, distance estimate and normal.
+inline GSample finish(bool escaped, uint n, float2 z, Der d, constant FSIterParams &P) {
+    GSample s;
+    if (!escaped) {
+        s.n = FS_INTERIOR;
+        s.frac = 0.0f;
+        s.de = 0.0f;
+        s.normal = half2(0.0h);
+        return s;
+    }
+    float r2 = dot(z, z);
+    s.n = n;
+    s.frac = clamp(1.0f - log2(log2(r2) / P.log2Bailout2) * P.invLog2Power, 0.0f, 0.99999f);
+    if (WITH_DER) {
+        // gradient of log|z| w.r.t. the pixel: J^T z / |z|^2
+        float2 g = IS_MANDEL ? cmul(float2(d.J.x, -d.J.y), z) : mattvec(d.J, z);
+        float lg = log2(max(length(g), 1e-30f)) + float(d.e);
+        float lr = 0.5f * log2(r2);
+        // DE = |z|^2 ln|z| / |g|  (in plane units), then in samples
+        s.de = 2.0f * lr + log2(lr * M_LN2_F) - lg - P.log2Step;
+        s.normal = half2(normalize(g));
+    } else {
+        s.de = 0.0f;
+        s.normal = half2(0.0h);
+    }
+    return s;
+}
+
+// Folds per-thread results into the pass statistics with one atomic per SIMD group.
+inline void record_stats(device atomic_uint *stats, bool active, bool escaped, uint n, uint maxIter, uint slot) {
+    bool esc = active && escaped;
+    bool late = esc && n > maxIter / 2;
+    uint lo = simd_min(esc ? n : 0xFFFFFFFFu);
+    uint hi = simd_max(esc ? n : 0u);
+    uint ce = simd_sum(esc ? 1u : 0u);
+    uint cl = simd_sum(late ? 1u : 0u);
+    if (simd_is_first() && ce > 0) {
+        device atomic_uint *s = stats + slot * 4;
+        atomic_fetch_min_explicit(s + 0, lo, memory_order_relaxed);
+        atomic_fetch_max_explicit(s + 1, hi, memory_order_relaxed);
+        atomic_fetch_add_explicit(s + 2, ce, memory_order_relaxed);
+        if (cl > 0) atomic_fetch_add_explicit(s + 3, cl, memory_order_relaxed);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Direct float iteration (shallow views, Julia sets)
+
+kernel void iterate_direct(device GSample *out [[buffer(0)]],
+                           constant FSIterParams &P [[buffer(1)]],
+                           device atomic_uint *stats [[buffer(7)]],
+                           uint2 gid [[thread_position_in_grid]]) {
+    uint2 pix = gid + P.origin;
+    bool active = pix.x < P.size.x && pix.y < P.size.y;
+    float2 pp = float2(pix) + 0.5f + P.jitter - 0.5f * float2(P.size);
+    float2 c = P.offsetM + scl(pp.x * P.stepX + pp.y * P.stepY, P.stepE);
+    float2 z = JULIA ? c : float2(0.0f);
+    if (JULIA) c = P.juliaC;
+
+    uint n = 0;
+    bool escaped = false;
+    Der d = der_init();
+    uint maxIter = active ? P.maxIter : 0;
+
+    bool inside = false;
+    if (IS_MANDEL && POWER == 2 && !JULIA) {
+        // main cardioid and period-2 bulb
+        float q = (c.x - 0.25f) * (c.x - 0.25f) + c.y * c.y;
+        inside = q * (q + (c.x - 0.25f)) <= 0.25f * c.y * c.y || (c.x + 1.0f) * (c.x + 1.0f) + c.y * c.y <= 0.0625f;
+    }
+    if (inside) maxIter = 0;
+
+    float2 zs = z;
+    uint period = 8;
+    float eps2 = max(scl(dot(P.stepX, P.stepX), 2 * P.stepE) * 1e-4f, 1e-24f);
+    while (n < maxIter) {
+        float r2 = dot(z, z);
+        if (r2 > P.bailout2) {
+            escaped = true;
+            break;
+        }
+        if (WITH_DER) d = der_step(d, z);
+        z = fz(z) + c;
+        n++;
+        float2 dz = z - zs;
+        if (dot(dz, dz) < eps2) {
+            n = maxIter;
+            break;
+        }
+        if (n == period) {
+            zs = z;
+            period *= 2;
+        }
+    }
+    if (active) out[(pix.y - P.bufOrigin.y) * P.bufStride + (pix.x - P.bufOrigin.x)] = finish(escaped, n, z, d, P);
+    record_stats(stats, active, escaped, n, P.maxIter, P.statsSlot);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Perturbation with BLA and rebasing (Mandelbrot-type formulas, non-Julia)
+
+kernel void iterate_perturb(device GSample *out [[buffer(0)]],
+                            constant FSIterParams &P [[buffer(1)]],
+                            device const float2 *Zf [[buffer(2)]],
+                            device const FSRefExt *Zx [[buffer(3)]],
+                            device const FSBLAEntry *bla [[buffer(4)]],
+                            device const float *blaR2 [[buffer(5)]],
+                            device const float *blaLogR [[buffer(6)]],
+                            device atomic_uint *stats [[buffer(7)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    uint2 pix = gid + P.origin;
+    bool active = pix.x < P.size.x && pix.y < P.size.y;
+    float2 pp = float2(pix) + 0.5f + P.jitter - 0.5f * float2(P.size);
+    fx dc = fx_add(fx{P.offsetM, P.offsetE}, fx{pp.x * P.stepX + pp.y * P.stepY, P.stepE});
+    float2 dcA = scl(dc.m, dc.e);
+
+    // z_1 = Z_1 + dc
+    uint n = 1, m = 1;
+    bool ext = DEEP && dc.e < -60;
+    float2 d = dcA;
+    fx w = dc;
+    Der der = der_init();
+    if (WITH_DER) der.J = float4(1.0f, 0.0f, IS_MANDEL ? 0.0f : 0.0f, IS_MANDEL ? 0.0f : 1.0f);
+
+    bool escaped = false;
+    float2 zEsc = float2(0.0f);
+    uint maxIter = active ? P.maxIter : 0;
+    uint refEnd = P.refLen - 1;
+
+    while (n <= maxIter) {
+        float2 Z, z;
+        FSRefExt Zr;
+        // ---- escape / rebase / precision-mode checks for z_n = Z_m + delta
+        if (!ext) {
+            Z = Zf[m];
+            z = Z + d;
+            float r2 = dot(z, z);
+            if (r2 > P.bailout2) {
+                escaped = true;
+                zEsc = z;
+                break;
+            }
+            if (n == maxIter) break;
+            float d2 = dot(d, d);
+            if (r2 < d2 || m >= refEnd) {
+                d = z;
+                m = 0;
+                Z = float2(0.0f);
+                d2 = r2;
+            }
+            if (DEEP && d2 < 0x1p-124f) {
+                ext = true;
+                w = fx_norm(d, 0);
+            }
+        }
+        if (DEEP && ext) {
+            Zr = Zx[m];
+            fx zx = fx_add(fx{Zr.m, Zr.e}, w);
+            if (zx.e > -40) {
+                float2 zz = scl(zx.m, zx.e);
+                if (dot(zz, zz) > P.bailout2) {
+                    escaped = true;
+                    zEsc = zz;
+                    break;
+                }
+            }
+            if (n == maxIter) break;
+            bool rebase = m >= refEnd;
+            if (!rebase && zx.e <= w.e + 1) {
+                int de2 = clamp(2 * (zx.e - w.e), -250, 2);
+                rebase = dot(zx.m, zx.m) * scl(1.0f, de2) < dot(w.m, w.m);
+            }
+            if (rebase) {
+                w = zx;
+                m = 0;
+                Zr = FSRefExt{float2(0.0f), FS_ZERO_EXP, 0};
+            }
+            if (w.e > -60) {
+                ext = false;
+                d = scl(w.m, w.e);
+                Z = Zf[m];
+                z = Z + d;
+            } else {
+                Z = Zf[m];
+                z = Z + scl(w.m, w.e);
+            }
+        }
+
+        // ---- advance
+        bool stepped = false;
+        if (USE_BLA && m > 0) {
+            uint j = m - 1;
+            int best = -1;
+            uint idx = 0;
+            if (!ext) {
+                float d2 = dot(d, d);
+                for (uint k = 0; k < P.blaLevels; k++) {
+                    if ((j & ((1u << k) - 1u)) != 0u) break;
+                    uint jj = j >> k;
+                    if (jj >= P.blaCount[k]) break;
+                    uint id = P.blaOffset[k] + jj;
+                    if (!(d2 < blaR2[id])) break;
+                    best = int(k);
+                    idx = id;
+                }
+            } else {
+                float lr = 0.5f * log2(dot(w.m, w.m)) + float(w.e);
+                for (uint k = 0; k < P.blaLevels; k++) {
+                    if ((j & ((1u << k) - 1u)) != 0u) break;
+                    uint jj = j >> k;
+                    if (jj >= P.blaCount[k]) break;
+                    uint id = P.blaOffset[k] + jj;
+                    if (!(lr < blaLogR[id])) break;
+                    best = int(k);
+                    idx = id;
+                }
+            }
+            if (best >= 0) {
+                FSBLAEntry E = bla[idx];
+                if (!ext) {
+                    d = scl(matvec(E.A, d), E.Ae) + scl(matvec(E.B, dc.m), E.Be + dc.e);
+                } else {
+                    w = fx_add(fx{matvec(E.A, w.m), E.Ae + w.e}, fx{matvec(E.B, dc.m), E.Be + dc.e});
+                }
+                if (WITH_DER) der = der_bla(der, E);
+                uint l = 1u << uint(best);
+                m += l;
+                n += l;
+                stepped = true;
+            }
+        }
+        if (!stepped) {
+            if (WITH_DER) der = der_step(der, z);
+            if (!ext) {
+                d = pert(Z, d) + dcA;
+            } else {
+                w = fx_add(pert_ext(Zr, w), dc);
+            }
+            m++;
+            n++;
+        }
+    }
+    if (escaped && n > maxIter) escaped = false;
+    if (active) out[(pix.y - P.bufOrigin.y) * P.bufStride + (pix.x - P.bufOrigin.x)] = finish(escaped, n, zEsc, der, P);
+    record_stats(stats, active, escaped, n, P.maxIter, P.statsSlot);
+}
+
+// ---------------------------------------------------------------------------------------------
+// BLA table construction
+
+kernel void bla_init(device FSBLAEntry *E [[buffer(0)]],
+                     device float *R2 [[buffer(1)]],
+                     device float *LR [[buffer(2)]],
+                     device const FSRefExt *Zx [[buffer(3)]],
+                     constant FSBLABuildParams &p [[buffer(4)]],
+                     uint i [[thread_position_in_grid]]) {
+    if (i >= p.count) return;
+    FSRefExt Z = Zx[i + 1];
+    float lz = Z.e == FS_ZERO_EXP ? -1e30f : log2(length(Z.m)) + float(Z.e);
+    float4 A;
+    int Ae;
+    float logR;
+    if (IS_MANDEL) {
+        float2 a = float2(1.0f, 0.0f);
+        for (int k = 1; k < POWER; k++) a = cmul(a, Z.m);
+        a *= float(POWER);
+        A = float4(a.x, -a.y, a.y, a.x);
+        Ae = (POWER - 1) * Z.e;
+        logR = p.log2Eps + 1.0f + lz - log2(float(POWER - 1));
+    } else {
+        A = jacobian(Z.m);
+        Ae = Z.e;
+        logR = p.log2Eps + 1.0f + lz;
+        if (FORMULA == FS_FORMULA_SHIP) {
+            float mn = min(abs(Z.m.x), abs(Z.m.y));
+            logR = min(logR, mn > 0.0f ? log2(mn) + float(Z.e) : -1e30f);
+        } else if (FORMULA == FS_FORMULA_CELTIC) {
+            float q = abs(Z.m.x * Z.m.x - Z.m.y * Z.m.y);
+            logR = min(logR, q > 0.0f ? log2(q) + float(Z.e) - 1.0f - (lz - float(Z.e)) : -1e30f);
+        }
+    }
+    if (Z.e == FS_ZERO_EXP) logR = -1e30f;
+    float a = max(max(abs(A.x), abs(A.y)), max(abs(A.z), abs(A.w)));
+    if (a > 0.0f) {
+        int k = expo(a);
+        A = scl(A, -k);
+        Ae += k;
+    }
+    FSBLAEntry e;
+    e.A = A;
+    e.Ae = Ae;
+    e.B = float4(0.5f, 0.0f, 0.0f, 0.5f);
+    e.Be = 1;
+    e.pad0 = 0;
+    e.pad1 = 0;
+    E[p.dstOffset + i] = e;
+    LR[p.dstOffset + i] = logR;
+    R2[p.dstOffset + i] = logR >= -62.0f ? exp2(2.0f * logR) : 0.0f;
+}
+
+inline float specnorm(float4 A) {
+    float S = dot(A, A);
+    float D = A.x * A.w - A.y * A.z;
+    return sqrt(0.5f * (S + sqrt(max(S * S - 4.0f * D * D, 0.0f))));
+}
+
+kernel void bla_merge(device FSBLAEntry *E [[buffer(0)]],
+                      device float *R2 [[buffer(1)]],
+                      device float *LR [[buffer(2)]],
+                      constant FSBLABuildParams &p [[buffer(4)]],
+                      uint i [[thread_position_in_grid]]) {
+    if (i >= p.count) return;
+    uint xi = p.srcOffset + 2 * i, yi = xi + 1;
+    FSBLAEntry x = E[xi], y = E[yi];
+    float4 A = matmul(y.A, x.A);
+    int Ae = y.Ae + x.Ae;
+    float4 B1 = matmul(y.A, x.B);
+    int B1e = y.Ae + x.Be;
+    int Be = max(B1e, y.Be);
+    float4 B = scl(B1, B1e - Be) + scl(y.B, y.Be - Be);
+    float a = max(max(abs(A.x), abs(A.y)), max(abs(A.z), abs(A.w)));
+    if (a > 0.0f) {
+        int k = expo(a);
+        A = scl(A, -k);
+        Ae += k;
+    }
+    float b = max(max(abs(B.x), abs(B.y)), max(abs(B.z), abs(B.w)));
+    if (b > 0.0f) {
+        int k = expo(b);
+        B = scl(B, -k);
+        Be += k;
+    }
+    float lrx = LR[xi], lry = LR[yi];
+    float lnA = log2(max(specnorm(x.A), 1e-30f)) + float(x.Ae);
+    float lnB = log2(max(specnorm(x.B), 1e-30f)) + float(x.Be) + p.log2C;
+    float lr;
+    if (lrx <= -1e29f || lry <= lnB) lr = -1e30f;
+    else lr = min(lrx, lry + log2(1.0f - exp2(lnB - lry)) - lnA);
+    FSBLAEntry e;
+    e.A = A;
+    e.Ae = Ae;
+    e.B = B;
+    e.Be = Be;
+    e.pad0 = 0;
+    e.pad1 = 0;
+    uint o = p.dstOffset + i;
+    E[o] = e;
+    LR[o] = lr;
+    R2[o] = lr >= -62.0f ? exp2(2.0f * lr) : 0.0f;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Statistics
+
+kernel void stats_reset(device uint *stats [[buffer(7)]], constant uint &slot [[buffer(0)]], uint i [[thread_position_in_grid]]) {
+    if (i > 0) return;
+    stats[slot * 4 + 0] = 0xFFFFFFFFu;
+    stats[slot * 4 + 1] = 0u;
+    stats[slot * 4 + 2] = 0u;
+    stats[slot * 4 + 3] = 0u;
+}
+
+// smooth.x = low iteration, smooth.y = span; alpha 1 snaps to the new statistics.
+kernel void stats_smooth(device const uint *stats [[buffer(7)]],
+                         device float4 *smooth [[buffer(0)]],
+                         constant float2 &args [[buffer(1)]],   // x: slot, y: alpha
+                         uint i [[thread_position_in_grid]]) {
+    if (i > 0) return;
+    uint slot = uint(args.x);
+    uint lo = stats[slot * 4 + 0], hi = stats[slot * 4 + 1], esc = stats[slot * 4 + 2];
+    if (esc == 0u) return;
+    float4 s = smooth[0];
+    float nlo = float(lo), nspan = max(float(hi - lo), 1.0f);
+    float a = args.y;
+    if (s.w == 0.0f) a = 1.0f;
+    // smooth in log space so large jumps settle quickly
+    float llo = log2(1.0f + s.x), lsp = log2(1.0f + s.y);
+    llo = mix(llo, log2(1.0f + nlo), a);
+    lsp = mix(lsp, log2(1.0f + nspan), a);
+    smooth[0] = float4(exp2(llo) - 1.0f, exp2(lsp) - 1.0f, 0.0f, 1.0f);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Colouring
+
+struct Shaded {
+    float3 rgb;
+};
+
+inline float3 shade(GSample s, constant FSColorParams &C, float4 st, texture2d<float> pal, sampler ps) {
+    if (s.n == FS_INTERIOR) return C.interior.rgb;
+    float base = floor(st.x);
+    float x = max(float(int(s.n) - int(base)) + s.frac - (st.x - base), 0.0f);
+    float t;
+    if (C.mapping == 0) t = x / 64.0f;
+    else if (C.mapping == 1) t = sqrt(x) / 4.0f;
+    else t = log2(1.0f + x);
+    t = t * C.density + C.offset;
+    float rowA = (C.paletteRow + 0.5f) / C.paletteCount;
+    float3 col = pal.sample(ps, float2(t, rowA)).rgb;
+    if (C.paletteMix > 0.0f) {
+        float rowB = (C.paletteRowB + 0.5f) / C.paletteCount;
+        col = mix(col, pal.sample(ps, float2(t, rowB)).rgb, C.paletteMix);
+    }
+    if (C.lightStrength > 0.0f) {
+        float2 g = float2(s.normal);
+        float3 N = normalize(float3(-g * 0.9f, 1.0f));
+        float ce = cos(C.lightElevation);
+        float3 L = float3(cos(C.lightAzimuth) * ce, sin(C.lightAzimuth) * ce, sin(C.lightElevation));
+        float diff = max(dot(N, L), 0.0f);
+        float3 H = normalize(L + float3(0.0f, 0.0f, 1.0f));
+        float spec = pow(max(dot(N, H), 0.0f), 40.0f);
+        float lit = 0.35f + 0.65f * diff / max(L.z, 0.2f) * 0.9f;
+        col = mix(col, col * lit + spec * 0.35f, C.lightStrength);
+    }
+    if (C.edgeStrength > 0.0f) {
+        float dpx = exp2(s.de);
+        float k = smoothstep(0.0f, 1.0f, dpx * 0.75f);
+        col *= mix(1.0f, k, C.edgeStrength);
+    }
+    return col;
+}
+
+inline GSample fetch(device const GSample *g, uint2 size, int2 p) {
+    p = clamp(p, int2(0), int2(size) - 1);
+    return g[uint(p.y) * size.x + uint(p.x)];
+}
+
+// Colour of an output pixel from a G-buffer of a (possibly) different size, bilinear on colours.
+inline float3 sample_gbuffer(device const GSample *g, uint2 gsize, uint2 outSize, uint2 o,
+                             constant FSColorParams &C, float4 st, texture2d<float> pal, sampler ps) {
+    if (gsize.x == outSize.x && gsize.y == outSize.y) return shade(g[o.y * gsize.x + o.x], C, st, pal, ps);
+    float2 gp = (float2(o) + 0.5f) * float2(gsize) / float2(outSize) - 0.5f;
+    int2 i0 = int2(floor(gp));
+    float2 f = gp - float2(i0);
+    float3 c00 = shade(fetch(g, gsize, i0), C, st, pal, ps);
+    float3 c10 = shade(fetch(g, gsize, i0 + int2(1, 0)), C, st, pal, ps);
+    float3 c01 = shade(fetch(g, gsize, i0 + int2(0, 1)), C, st, pal, ps);
+    float3 c11 = shade(fetch(g, gsize, i0 + int2(1, 1)), C, st, pal, ps);
+    return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+}
+
+kernel void colorize(texture2d<float, access::read_write> acc [[texture(0)]],
+                     texture2d<float> pal [[texture(1)]],
+                     device const GSample *g [[buffer(0)]],
+                     device const GSample *fb [[buffer(1)]],
+                     device const uint *tileDone [[buffer(2)]],
+                     constant FSColorParams &C [[buffer(3)]],
+                     device const float4 *smooth [[buffer(4)]],
+                     uint2 o [[thread_position_in_grid]]) {
+    if (o.x >= C.outSize.x || o.y >= C.outSize.y) return;
+    constexpr sampler ps(filter::linear, s_address::repeat, t_address::clamp_to_edge);
+    float4 st = smooth[0];
+    float3 col;
+    bool usePrimary = true;
+    if (C.useFallback != 0u) {
+        uint2 gp = uint2((float2(o) + 0.5f) * float2(C.gSize) / float2(C.outSize));
+        uint2 t = min(gp / C.tileSize, C.tileGrid - 1);
+        usePrimary = tileDone[t.y * C.tileGrid.x + t.x] != 0u;
+    }
+    if (usePrimary) col = sample_gbuffer(g, C.gSize, C.outSize, o, C, st, pal, ps);
+    else col = sample_gbuffer(fb, C.fbSize, C.outSize, o, C, st, pal, ps);
+    float4 prev = C.accumulate != 0u ? acc.read(o) : float4(0.0f);
+    acc.write(prev + float4(col, 1.0f), o);
+}
+
+inline float srgb_encode(float c) {
+    c = clamp(c, 0.0f, 1.0f);
+    return c <= 0.0031308f ? 12.92f * c : 1.055f * pow(c, 1.0f / 2.4f) - 0.055f;
+}
+
+inline float hash12(float2 p) {
+    float3 p3 = fract(float3(p.xyx) * 0.1031f);
+    p3 += dot(p3, p3.yzx + 33.33f);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+kernel void present(texture2d<float, access::read> acc [[texture(0)]],
+                    texture2d<float, access::write> dst [[texture(1)]],
+                    constant FSPresentParams &P [[buffer(0)]],
+                    uint2 o [[thread_position_in_grid]]) {
+    if (o.x >= P.size.x || o.y >= P.size.y) return;
+    float4 a = acc.read(o);
+    float3 c = a.rgb / max(a.w, 1e-6f) * P.exposure;
+    float n = hash12(float2(o)) + hash12(float2(o) + 17.13f) - 1.0f;
+    float3 s = float3(srgb_encode(c.r), srgb_encode(c.g), srgb_encode(c.b)) + n * P.ditherAmp;
+    dst.write(float4(s, 1.0f), o);
+}
