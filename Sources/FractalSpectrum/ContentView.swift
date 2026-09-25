@@ -442,11 +442,13 @@ struct HUDBar: View {
     var body: some View {
         let s = model.status
         HStack(spacing: 16) {
-            item("scope", s?.view.zoomText ?? "—", "zoom")
+            item("scope", s.map { ScaleFact.magnification($0.view.zoomLog10) } ?? "—", "magnification")
             divider
             item("arrow.triangle.2.circlepath", (s?.maxIter ?? model.iter.maxIter).formatted(), "iterations")
             divider
-            item("speedometer", "\(Int(s?.fps ?? 0))", "fps")
+            item("speedometer", "\(Int((s?.fps ?? 0).rounded()))", "fps")
+            divider
+            item("bolt.fill", rateText(s?.iterationRate ?? 0), "iterations / s")
             divider
             HStack(spacing: 7) {
                 ProgressRing(progress: s?.progress ?? 0, active: (s?.stage ?? "") != "Done")
@@ -468,6 +470,16 @@ struct HUDBar: View {
         .glassEffect(.regular, in: Capsule())
         .onTapGesture(count: 2) { model.copyCoordinates() }
         .help("Double-click to copy the coordinates")
+    }
+
+    private func rateText(_ r: Double) -> String {
+        switch r {
+        case 1e15...: return String(format: "%.1f P", r / 1e15)
+        case 1e12...: return String(format: "%.1f T", r / 1e12)
+        case 1e9...: return String(format: "%.1f G", r / 1e9)
+        case 1e6...: return String(format: "%.0f M", r / 1e6)
+        default: return "—"
+        }
     }
 
     private var divider: some View {

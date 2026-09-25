@@ -47,6 +47,8 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         var perturbed: Bool
         var referenceProgress: Double?
         var samples: Int
+        /// Effective iterations per second of GPU time over the last compute passes.
+        var iterationRate: Double
     }
 
     // Surfaces
@@ -98,6 +100,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     private var lastStatus = 0.0
     private var lastGpuMs = 0.0
     private var lastIterChange = 0.0
+    private var iterationRate = 0.0
     private let presentInFlight = DispatchSemaphore(value: 2)
 
     init(engine: Engine, camera: Camera) {
@@ -210,8 +213,10 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
                 if self.recordFrames { self.passLog.append((submitTime, ms, samples, note)) }
                 self.lastGpuMs = ms
                 self.learnCost(ms: ms, samples: samples, total: totalSamples)
-                if let slot = statsSlot, sceneAtEncode == self.sceneVersion {
-                    self.consider(stats: self.engine.readStats(slot), samples: samples)
+                if let slot = statsSlot {
+                    let st = self.engine.readStats(slot)
+                    if ms > 0.5 { self.iterationRate = self.iterationRate * 0.7 + Double(st.iterations) / (ms / 1000) * 0.3 }
+                    if sceneAtEncode == self.sceneVersion { self.consider(stats: st, samples: samples) }
                 }
             }
         }
@@ -525,6 +530,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         }
         onStatus(Status(fps: shownFps, gpuMs: lastGpuMs, stage: stageName, progress: progress,
                         maxIter: iter.maxIter, view: camera.view, perturbed: lastPlanPerturbed,
-                        referenceProgress: ref.computing ? ref.progress : nil, samples: accSamples))
+                        referenceProgress: ref.computing ? ref.progress : nil, samples: accSamples,
+                        iterationRate: iterationRate))
     }
 }

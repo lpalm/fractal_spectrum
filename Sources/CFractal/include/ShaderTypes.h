@@ -88,7 +88,7 @@ typedef struct {
     fs_uint lateEscaped;    // escaped in the upper half of the iteration limit
     fs_uint unresolved;     // reached the limit without escaping or a detected cycle
     fs_uint interior;       // attracting cycle detected
-    fs_uint pad0;
+    float iterations;       // sum of iteration counts (including iterations skipped by BLA)
     fs_uint pad1;
 } FSStats;
 

@@ -21,7 +21,7 @@ struct Location: Identifiable, Hashable {
     }
 
     var depthText: String {
-        zoom < 3 ? String(format: "%.0f×", pow(10, zoom)) : String(format: "10^%.0f", zoom)
+        zoom < 3 ? String(format: "%.0f×", pow(10, zoom)) : ScaleFact.power(Int(zoom.rounded()))
     }
 
     static func == (a: Location, b: Location) -> Bool { a.id == b.id }

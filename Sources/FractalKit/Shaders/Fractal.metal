@@ -327,8 +327,10 @@ inline void record_stats(device atomic_uint *stats, bool active, uint status, ui
     uint cl = simd_sum(esc && n > maxIter / 2 ? 1u : 0u);
     uint cu = simd_sum(active && status == 2 ? 1u : 0u);
     uint ci = simd_sum(active && status == 1 ? 1u : 0u);
+    float work = simd_sum(active ? float(n) : 0.0f);
     if (simd_is_first()) {
         device atomic_uint *s = stats + slot * 8;
+        atomic_fetch_add_explicit((device atomic_float *)(s + 6), work, memory_order_relaxed);
         if (ce > 0) {
             atomic_fetch_min_explicit(s + 0, lo, memory_order_relaxed);
             atomic_fetch_max_explicit(s + 1, hi, memory_order_relaxed);
