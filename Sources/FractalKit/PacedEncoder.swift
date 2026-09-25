@@ -25,10 +25,10 @@ final class PacedEncoder {
 
     deinit { encoder.endEncoding() }
 
-    /// Iterates a region, committing a command buffer after every chunk except the last, which stays
-    /// open in `encoder` for the caller's follow-up work.
+    /// Iterates a region (only the samples `refineMask` marks, if given), committing a command buffer
+    /// after every chunk except the last, which stays open in `encoder` for the caller's follow-up work.
     func iterate(_ engine: Engine, plan: Engine.Plan, into gBuffer: MTLBuffer, origin: SIMD2<Int>, size: SIMD2<Int>,
-                 bufferOrigin: SIMD2<UInt32>, bufferStride: UInt32) {
+                 bufferOrigin: SIMD2<UInt32>, bufferStride: UInt32, refineMask: MTLBuffer? = nil) {
         var y = 0
         while y < size.y {
             // 8-row bands keep the 8×8 threadgroups full; a band over budget is split along the row.
@@ -40,7 +40,7 @@ final class PacedEncoder {
                 engine.encodeIterate(encoder, plan: plan, into: gBuffer,
                                      origin: SIMD2(UInt32(origin.x + x), UInt32(origin.y + y)),
                                      size: SIMD2(UInt32(columns), UInt32(rows)),
-                                     bufferOrigin: bufferOrigin, bufferStride: bufferStride)
+                                     bufferOrigin: bufferOrigin, bufferStride: bufferStride, refineMask: refineMask)
                 encodedSamples += columns * rows
                 x += columns
             }

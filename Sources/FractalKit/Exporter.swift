@@ -165,13 +165,13 @@ public final class Exporter: @unchecked Sendable {
             let zoomed = previousView.map { (view.log2Radius - $0.log2Radius) * (t > 0.8 ? 4 : 1) }
             let scene = FractalScene(formula: job.formula, view: view, iteration: iteration)
             // the Core Video texture must outlive the GPU's drawing into it
-            let (stats, gpuMs) = withExtendedLifetime(cvTexture) {
+            let (stats, gpuMs, passes) = withExtendedLifetime(cvTexture) {
                 renderer.render(scene: scene, color: color, samples: job.samples, into: texture, zoomed: zoomed)
             }
             previousView = view
             // iterations only ever grow during a zoom-in, so colours never jump back
             let proposal = IterationTuner.adjustOffline(maxIter: iteration.maxIter, stats: stats, samples: job.width * job.height,
-                                                        gpuMs: gpuMs, passes: job.samples)
+                                                        gpuMs: gpuMs, passes: passes)
             iteration.maxIter = max(iteration.maxIter, proposal)
             try movie.appendWhenReady(pixelBuffer, at: CMTime(value: CMTimeValue(frame), timescale: CMTimeScale(job.fps)))
             // previews at most four times a second, and for every frame of a slow stretch
@@ -198,14 +198,23 @@ public final class Exporter: @unchecked Sendable {
     }
 }
 
-/// Renders complete frames (all samples) into a texture, moving the colour origin with the zoom
-/// from frame to frame.
+/// Renders the frames of a zoom into a texture, moving the colour origin with the zoom from frame to
+/// frame. The first frame gets all its samples (further ones only where the first left visible
+/// differences between neighbours); each later frame gets one new sample, blended with the previous
+/// frame moved to its view, which averages about as many samples at the cost of one.
 public final class FrameRenderer {
     let engine: Engine
     public let width: Int
     public let height: Int
     private let gBuffer: MTLBuffer
+    private let refineMask: MTLBuffer
     private let accumulator: MTLTexture
+    /// The last frame's image and the next one's, alternating.
+    private let images: [MTLTexture]
+    private var previousView: Viewport?
+    private var frameIndex = 0
+    /// Where in the sub-pixel sequence a continuing frame's new samples start.
+    private var nextJitter = 0
     private let paced: PacedEncoder
 
     public init(engine: Engine, width: Int, height: Int) {
@@ -213,37 +222,71 @@ public final class FrameRenderer {
         self.width = width
         self.height = height
         gBuffer = engine.makeGBuffer(samples: width * height)
+        refineMask = engine.makeRefineMask(samples: width * height)
         accumulator = engine.makeAccumulator(width: width, height: height)
+        images = [engine.makeAccumulator(width: width, height: height), engine.makeAccumulator(width: width, height: height)]
         paced = PacedEncoder(queue: engine.queue)
     }
 
-    /// Renders one frame; `zoomed` is the zoom since the previous frame in doublings (nil for a first
-    /// frame). Returns the escape statistics of the first sample and the GPU time taken.
+    /// Renders the next frame of `samples` samples; `zoomed` is the zoom since the previous frame in
+    /// doublings, nil for a frame that does not continue it (whose samples are then all its own).
+    /// Returns the escape statistics of its first pass, the GPU time taken and the number of passes.
     @discardableResult
     public func render(scene: FractalScene, color: ColorSettings, samples: Int, into target: MTLTexture,
-                       zoomed: Double?) -> (stats: FSStats, gpuMs: Double) {
+                       zoomed: Double?) -> (stats: FSStats, gpuMs: Double, passes: Int) {
         let startMs = paced.gpuMs
         let size = SIMD2(UInt32(width), UInt32(height))
         let region = Engine.GBufferRegion(buffer: gBuffer, size: size)
+        let previous = samples > 1 && zoomed != nil ? previousView : nil
+        let reprojection = previous.map {
+            scene.view.reprojection(from: $0, width: width, height: height, flipY: scene.formula.family.flipY)
+        }
+        // by the actual magnification: `zoomed` may hurry the colour origin
+        let (alpha, passes) = FrameRenderer.blend(samples: max(samples, 1),
+                                                  zoomed: previous.map { scene.view.log2Radius - $0.log2Radius })
+        // a continuing frame's samples carry on along the sequence, so that the average covers the pixel
+        let firstJitter = reprojection == nil ? 0 : nextJitter
         var firstSlot: UInt32 = 0
-        for sample in 0..<max(samples, 1) {
+        for pass in 0..<passes {
             let slot = engine.nextStatsSlot()
-            if sample == 0 { firstSlot = slot }
-            let grid = Engine.Grid(width: width, height: height, jitter: Engine.jitter(sample))
+            if pass == 0 { firstSlot = slot }
+            let grid = Engine.Grid(width: width, height: height, jitter: Engine.jitter(firstJitter + pass))
             guard let plan = engine.makePlan(scene: scene, grid: grid, encoder: paced.encoder, blocking: true,
                                              statsSlot: slot) else { break }
             engine.encodeStatsReset(paced.encoder, slot: slot)
             paced.iterate(engine, plan: plan, into: gBuffer, origin: .zero, size: SIMD2(width, height),
-                          bufferOrigin: .zero, bufferStride: UInt32(width))
-            if sample == 0 { engine.encodeColorOrigin(paced.encoder, slot: slot, zoomed: zoomed) }
+                          bufferOrigin: .zero, bufferStride: UInt32(width), refineMask: pass > 0 ? refineMask : nil)
+            if pass == 0 { engine.encodeColorOrigin(paced.encoder, slot: slot, zoomed: zoomed) }
             engine.encodeColorize(paced.encoder, into: accumulator, from: region, fallback: nil, color: color,
-                                  accumulate: sample > 0, size: size)
-            if sample == samples - 1 || samples <= 1 {
-                engine.encodePresent(paced.encoder, from: accumulator, into: target, sourceSize: size,
-                                     background: color.interior, size: size)
+                                  accumulate: pass > 0, size: size)
+            if pass == 0 && passes > 1 {
+                engine.encodeRefineMask(paced.encoder, from: accumulator, into: refineMask, size: size, stride: UInt32(width))
             }
         }
+        let image = images[frameIndex % 2]
+        engine.encodeTemporalBlend(paced.encoder, samples: accumulator, previous: images[(frameIndex + 1) % 2], into: image,
+                                   reprojection: reprojection, alpha: Float(alpha), size: size)
+        engine.encodePresent(paced.encoder, from: image, into: target, sourceSize: size, background: color.interior, size: size)
         paced.sync()
-        return (engine.readStats(firstSlot), paced.gpuMs - startMs)
+        previousView = scene.view
+        frameIndex += 1
+        nextJitter = firstJitter + passes
+        return (engine.readStats(firstSlot), paced.gpuMs - startMs, passes)
+    }
+
+    /// Softening accepted from the previous frame, which each frame magnifies: its moved image may make
+    /// a frame this much blurrier (as a factor of feature size).
+    static let reuseSoftening = 1.15
+
+    /// Weight of a frame's new samples in the running average, and how many new samples it takes, for
+    /// `samples` samples per frame and a zoom since the previous frame of `zoomed` doublings (nil: no
+    /// previous frame). An exponential average with weight α averages about 2/α − 1 frames; the moved
+    /// previous frames blur a frame by α / (1 − (1 − α) s) at a magnification s per frame, which bounds
+    /// α from below in fast zooms, where more new samples make up for the shorter average.
+    static func blend(samples: Int, zoomed: Double?) -> (alpha: Double, passes: Int) {
+        guard let zoomed, samples > 1 else { return (1, samples) }
+        let s = exp2(abs(zoomed)), b = reuseSoftening
+        let alpha = max(2 / Double(samples + 1), b * (s - 1) / (b * s - 1))
+        return (alpha, min(samples, Int((Double(samples) / (2 / alpha - 1)).rounded(.up))))
     }
 }

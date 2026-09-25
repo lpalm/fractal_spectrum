@@ -33,7 +33,7 @@ typedef struct {
     fs_uint2 origin;        // tile origin in samples
     fs_uint2 bufferOrigin;  // sample stored at index 0 of the G-buffer
     fs_uint bufferStride;   // G-buffer row length
-    fs_uint pad0;
+    fs_uint refineOnly;     // 1: iterate only the samples marked in the refinement mask (see refine_mask)
     fs_uint2 workSize;      // rectangle of samples processed by this dispatch
     fs_float2 offsetM;      // mantissa of (view center - reference start); direct kernel: view center
     fs_float2 stepX;        // mantissa of the complex delta per +1 sample in x
@@ -138,6 +138,22 @@ typedef struct {
     float headroom;         // EDR headroom of the display (1 = SDR)
     fs_float4 background;   // linear colour outside the source image
 } FSPresentParams;
+
+// Parameters of refine_mask: which samples of a first pass get further anti-aliasing samples.
+typedef struct {
+    fs_uint2 size;          // region in samples
+    fs_uint stride;         // row length of the mask (and of the G-buffer)
+    float threshold;        // largest colour difference to a neighbour (sRGB, 0...1) left at one sample
+} FSRefineParams;
+
+// Parameters of temporal_blend: a video frame's new samples blended with the previous frame's image.
+typedef struct {
+    fs_float4 A;            // centred pixels of this frame -> centred pixels of the previous one: A q + b
+    fs_float2 b;
+    fs_uint2 size;          // frame size in pixels (both frames)
+    float alpha;            // weight of the new samples
+    fs_uint hasPrevious;    // 0: the frame takes only its new samples
+} FSTemporalParams;
 
 #endif
 // Escape-time kernels: direct float iteration for shallow views, perturbation with bilinear
@@ -460,8 +476,19 @@ inline GSample make_sample(bool escaped, uint n, float2 z, Derivative d, constan
 // ---------------------------------------------------------------------------------------------
 // Output and statistics
 
+// Index of a sample in the G-buffer (and in the refinement mask).
+inline uint sample_index(constant FSIterParams &P, uint2 pix) {
+    return (pix.y - P.bufferOrigin.y) * P.bufferStride + (pix.x - P.bufferOrigin.x);
+}
+
 inline void store_sample(device GSample *out, constant FSIterParams &P, uint2 pix, GSample g) {
-    out[(pix.y - P.bufferOrigin.y) * P.bufferStride + (pix.x - P.bufferOrigin.x)] = g;
+    out[sample_index(P, pix)] = g;
+}
+
+// Later anti-aliasing passes of an offline frame iterate only the samples refine_mask marked; the
+// others keep their first sample in the G-buffer.
+inline bool skips(constant FSIterParams &P, device const uchar *refineMask, uint2 pix, bool active) {
+    return P.refineOnly != 0u && active && refineMask[sample_index(P, pix)] == 0u;
 }
 
 // Folds each thread's outcome into the pass statistics (FSStats, as uints) with one atomic per SIMD group.
@@ -494,9 +521,11 @@ inline void record_stats(device atomic_uint *stats, bool active, uint outcome, u
 kernel void iterate_direct(device GSample *out [[buffer(0)]],
                            constant FSIterParams &P [[buffer(1)]],
                            device atomic_uint *stats [[buffer(7)]],
+                           device const uchar *refineMask [[buffer(17)]],
                            uint2 gid [[thread_position_in_grid]]) {
     uint2 pix = gid + P.origin;
     bool active = gid.x < P.workSize.x && gid.y < P.workSize.y;
+    if (skips(P, refineMask, pix, active)) return;
     float2 q = float2(pix) + 0.5f + P.jitter - 0.5f * float2(P.size);   // from the view centre, in samples
     float2 c = P.offsetM + scale2(q.x * P.stepX + q.y * P.stepY, P.stepE);
     float2 z = JULIA ? c : float2(0.0f);
@@ -630,9 +659,11 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
                             device const float *criticalBLALog2MinZ [[buffer(14)]],
                             device const float *blaMaxRadius2 [[buffer(15)]],
                             device const float *criticalBLAMaxRadius2 [[buffer(16)]],
+                            device const uchar *refineMask [[buffer(17)]],
                             uint2 gid [[thread_position_in_grid]]) {
     uint2 pix = gid + P.origin;
     bool active = gid.x < P.workSize.x && gid.y < P.workSize.y;
+    if (skips(P, refineMask, pix, active)) return;
     float2 q = float2(pix) + 0.5f + P.jitter - 0.5f * float2(P.size);
     // Offset of this sample from the reference start: dc in the parameter plane, the initial
     // difference for Julia sets (whose iteration adds no per-sample constant).
@@ -1056,6 +1087,10 @@ inline float srgb_encode(float c) {
     return c <= 0.0031308f ? 12.92f * c : 1.055f * pow(c, 1.0f / 2.4f) - 0.055f;
 }
 
+inline float3 srgb_encode(float3 c) {
+    return float3(srgb_encode(c.r), srgb_encode(c.g), srgb_encode(c.b));
+}
+
 // Pseudo-random value in [0, 1) from a position (Dave Hoskins' "hash without sine").
 inline float hash12(float2 p) {
     float3 p3 = fract(float3(p.xyx) * 0.1031f);
@@ -1109,7 +1144,76 @@ kernel void present(texture2d<float, access::read> accumulator [[texture(0)]],
     }
     // triangular dither of one 8-bit step against banding in smooth gradients
     float dither = hash12(float2(o)) + hash12(float2(o) + 17.13f) - 1.0f;
-    float3 encoded = float3(srgb_encode(c.r), srgb_encode(c.g), srgb_encode(c.b)) + dither * (1.0f / 255.0f);
-    target.write(float4(encoded, 1.0f), o);
+    target.write(float4(srgb_encode(c) + dither * (1.0f / 255.0f), 1.0f), o);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Adaptive anti-aliasing
+
+// Marks the samples whose first-pass colour differs visibly from a neighbour's, and those on the
+// region's edge (whose neighbours may lie in another tile): only these get an offline frame's further
+// anti-aliasing samples.
+kernel void refine_mask(texture2d<float, access::read> accumulator [[texture(0)]],
+                        device uchar *mask [[buffer(0)]],
+                        constant FSRefineParams &R [[buffer(1)]],
+                        uint2 o [[thread_position_in_grid]]) {
+    if (o.x >= R.size.x || o.y >= R.size.y) return;
+    bool refine = o.x == 0 || o.y == 0 || o.x + 1 == R.size.x || o.y + 1 == R.size.y;
+    float3 c = srgb_encode(accumulator.read(o).rgb);   // one sample so far: alpha 1
+    for (int dy = -1; dy <= 1 && !refine; dy++) {
+        for (int dx = -1; dx <= 1 && !refine; dx++) {
+            float3 d = abs(srgb_encode(accumulator.read(uint2(int2(o) + int2(dx, dy))).rgb) - c);
+            refine = max(d.r, max(d.g, d.b)) > R.threshold;
+        }
+    }
+    mask[o.y * R.stride + o.x] = refine ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Temporal accumulation (zoom videos)
+
+// Catmull-Rom interpolation of an image at `p` (texel centres at +0.5; outside, the nearest edge
+// texel), clamped to its central 2x2 texels so that it cannot ring at sharp edges.
+inline float3 catmull_rom(texture2d<float, access::read> image, float2 p, uint2 size) {
+    float2 t = p - 0.5f;
+    float2 i = floor(t);
+    float2 f = t - i;
+    float2 w[4] = {f * (-0.5f + f * (1.0f - 0.5f * f)), 1.0f + f * f * (-2.5f + 1.5f * f),
+                   f * (0.5f + f * (2.0f - 1.5f * f)), f * f * (-0.5f + 0.5f * f)};
+    int2 last = int2(size) - 1;
+    float3 sum = 0.0f, lo = INFINITY, hi = -INFINITY;
+    for (int y = 0; y < 4; y++) {
+        for (int x = 0; x < 4; x++) {
+            float3 c = image.read(uint2(clamp(int2(i) + int2(x - 1, y - 1), int2(0), last))).rgb;
+            sum += w[x].x * w[y].y * c;
+            if ((x == 1 || x == 2) && (y == 1 || y == 2)) {
+                lo = min(lo, c);
+                hi = max(hi, c);
+            }
+        }
+    }
+    return clamp(sum, lo, hi);
+}
+
+// Blends a video frame's new samples (the accumulator's average) with the previous frame's image moved
+// to this frame's view: consecutive frames of a zoom show mostly the same plane, so their running
+// average stands in for more samples per frame. Pixels whose previous position lies outside the
+// previous frame take only the new samples.
+kernel void temporal_blend(texture2d<float, access::read> accumulator [[texture(0)]],
+                           texture2d<float, access::read> previous [[texture(1)]],
+                           texture2d<float, access::write> blended [[texture(2)]],
+                           constant FSTemporalParams &T [[buffer(0)]],
+                           uint2 o [[thread_position_in_grid]]) {
+    if (o.x >= T.size.x || o.y >= T.size.y) return;
+    float4 a = accumulator.read(o);
+    float3 color = a.rgb / max(a.w, 1e-6f);
+    if (T.hasPrevious != 0u) {
+        float2 q = float2(o) + 0.5f - 0.5f * float2(T.size);
+        float2 source = float2(dot(T.A.xy, q), dot(T.A.zw, q)) + T.b + 0.5f * float2(T.size);
+        if (all(source >= 0.0f) && all(source <= float2(T.size))) {
+            color = mix(catmull_rom(previous, source, T.size), color, T.alpha);
+        }
+    }
+    blended.write(float4(color, 1.0f), o);
 }
 """#

@@ -31,7 +31,7 @@ typedef struct {
     fs_uint2 origin;        // tile origin in samples
     fs_uint2 bufferOrigin;  // sample stored at index 0 of the G-buffer
     fs_uint bufferStride;   // G-buffer row length
-    fs_uint pad0;
+    fs_uint refineOnly;     // 1: iterate only the samples marked in the refinement mask (see refine_mask)
     fs_uint2 workSize;      // rectangle of samples processed by this dispatch
     fs_float2 offsetM;      // mantissa of (view center - reference start); direct kernel: view center
     fs_float2 stepX;        // mantissa of the complex delta per +1 sample in x
@@ -136,5 +136,21 @@ typedef struct {
     float headroom;         // EDR headroom of the display (1 = SDR)
     fs_float4 background;   // linear colour outside the source image
 } FSPresentParams;
+
+// Parameters of refine_mask: which samples of a first pass get further anti-aliasing samples.
+typedef struct {
+    fs_uint2 size;          // region in samples
+    fs_uint stride;         // row length of the mask (and of the G-buffer)
+    float threshold;        // largest colour difference to a neighbour (sRGB, 0...1) left at one sample
+} FSRefineParams;
+
+// Parameters of temporal_blend: a video frame's new samples blended with the previous frame's image.
+typedef struct {
+    fs_float4 A;            // centred pixels of this frame -> centred pixels of the previous one: A q + b
+    fs_float2 b;
+    fs_uint2 size;          // frame size in pixels (both frames)
+    float alpha;            // weight of the new samples
+    fs_uint hasPrevious;    // 0: the frame takes only its new samples
+} FSTemporalParams;
 
 #endif
