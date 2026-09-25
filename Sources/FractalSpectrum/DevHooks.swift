@@ -65,7 +65,7 @@ final class DevHooks {
                 let passes = model.renderer.passLog.map { String(format: "%.4f,%.2f,%d,%@", $0.t, $0.ms, $0.samples, $0.note) }
                 try? passes.joined(separator: "\n").write(toFile: arg + ".passes", atomically: true, encoding: .utf8)
             }
-        case "speed": model.autopilotSpeed = Double(arg) ?? model.autopilotSpeed
+        case "speed": model.pilot.speed = Double(arg) ?? model.pilot.speed
         case "export-image":
             model.export.imageSize = ExportController.imageSizes[0]
             model.export.imageSamples = 4
