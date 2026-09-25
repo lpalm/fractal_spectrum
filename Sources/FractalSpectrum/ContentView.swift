@@ -541,7 +541,8 @@ struct HUDBar: View {
             divider
             item("arrow.triangle.2.circlepath", (s?.maxIter ?? model.iter.maxIter).formatted(), "iterations")
             divider
-            item("speedometer", "\(Int((s?.fps ?? 0).rounded()))", "fps")
+            // measured only while the view moves
+            item("speedometer", s.map { $0.fps > 0 ? "\(Int($0.fps.rounded()))" : "—" } ?? "—", "fps")
             divider
             item("bolt.fill", rateText(s?.iterationRate ?? 0), "effective iter / s")
             divider
