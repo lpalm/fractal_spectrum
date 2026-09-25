@@ -13,9 +13,9 @@ if DEVELOPER_DIR=$xcode xcrun --find metal >/dev/null 2>&1; then
 elif [[ -d $xcode ]]; then
   flags=(-Xswiftc -plugin-path -Xswiftc $xcode/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins)
 fi
-swift build -c release --product FractalSpectrum $flags 2>&1 | grep -vE "ld: warning|was built for newer" || true
+# the filter fails when it prints nothing; only a failed build stops the script
+swift build -c release --product FractalSpectrum $flags 2>&1 | grep -vE "ld: warning|was built for newer" || (( ! pipestatus[1] ))
 bin=$(swift build -c release --show-bin-path $flags)/FractalSpectrum
-[[ -x $bin ]] || { echo "build failed"; exit 1; }
 
 app=$root/build/Spectrum.app
 rm -rf $app

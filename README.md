@@ -10,9 +10,11 @@ Requires macOS 26, Xcode (or the command-line tools plus Xcode's SwiftUI plug-in
 `brew install gmp mpfr`.
 
 ```bash
-./scripts/build_app.sh
-open build/Spectrum.app
+./scripts/run_app.sh
 ```
+
+It builds `build/Spectrum.app` and opens it, quitting a running copy first; in IntelliJ, the shared
+run configuration **Spectrum** does the same.
 
 `fscli` renders, verifies and benchmarks headlessly, for example:
 
