@@ -242,6 +242,8 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
 
         let samples = iteratedSamples
         let totalSamples = size.x * size.y
+        // within the scale hysteresis of the smallest preview
+        let smallest = work == .preview && previewScale < LiveRenderer.smallestPreview * 1.13
         let submitTime = CACurrentMediaTime()
         let note = "\(work) scale \(String(format: "%.2f", previewScale)) iter \(iter.maxIter)"
         cbIter.addCompletedHandler { [weak self] cb in
@@ -257,9 +259,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
                     // (possible) interior: detected cycles or samples stuck at the limit.
                     self.interiorLikely = Double(st.interior + st.unresolved) > Double(samples) * 0.002
                     if ms > 0.5 { self.iterationRate = self.iterationRate * 0.7 + Double(st.iterations) / (ms / 1000) * 0.3 }
-                    if sceneAtEncode == self.sceneVersion {
-                        self.consider(stats: st, samples: samples, fullFrameMs: ms * Double(totalSamples) / Double(max(samples, 1)))
-                    }
+                    if sceneAtEncode == self.sceneVersion { self.consider(stats: st, samples: samples, ms: ms, smallest: smallest) }
                 }
             }
         }
@@ -366,13 +366,16 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
 
     private func scene(_ v: Viewport) -> FractalScene { FractalScene(formula: formula, view: v, iter: iter) }
 
+    /// Smallest preview scale (fraction of the drawable per axis).
+    static let smallestPreview = 0.12
+
     /// Renders the whole view at a resolution that fits the frame budget.
     private func encodePreview(iter: MTLComputeCommandEncoder, color enc: MTLComputeCommandEncoder, view v: Viewport,
                                moving: Bool) -> (samples: Int, slot: UInt32?) {
         let full = Double(size.x * size.y)
         let affordable = max(budgetMs - tailMs, 0.5) / max(costMsPerMSample, 1e-6) * 1e6   // samples
         var s = sqrt(affordable / full)
-        s = min(1, max(0.12, s))
+        s = min(1, max(LiveRenderer.smallestPreview, s))
         if abs(s - previewScale) / previewScale > 0.12 || s == 1 { previewScale = s }
         if !moving && previewScale > 0.7 { previewScale = 1 }
         let pw = max(8, Int(Double(size.x) * previewScale)), ph = max(8, Int(Double(size.y) * previewScale))
@@ -542,21 +545,27 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    /// Applies the tuner's proposal, keeping a full frame under about 0.6 s so that even the smallest
-    /// preview fits the frame budget; above 1.2 s the limit is lowered. `fullFrameMs` is
-    /// scaled from the pass, so it errs high for small, tail-dominated passes. While the camera moves,
-    /// increases are rate-limited: every pass sees a different view, and unthrottled doubling would
-    /// multiply the cost of each next preview.
-    private func consider(stats: FSStats, samples: Int, fullFrameMs: Double) {
+    /// Largest iteration limit the smallest preview affords, from the latest preview (for the autopilot).
+    private(set) var affordableIterations = Int.max
+
+    /// Applies the tuner's proposal, keeping the smallest preview within about one frame budget:
+    /// compute passes that run longer hold up presentation, and a preview's time is bounded below by
+    /// its slowest samples, which run to the limit, so it grows with the limit. A smallest preview
+    /// over two budgets lowers the limit. While the camera moves, increases are rate-limited:
+    /// every pass sees a different view, and unthrottled doubling would multiply the cost of each
+    /// next preview.
+    private func consider(stats: FSStats, samples: Int, ms: Double, smallest: Bool) {
         guard iter.autoIterations else { return }
+        let smallestSamples = Double(size.x * size.y) * LiveRenderer.smallestPreview * LiveRenderer.smallestPreview
+        let smallestMs = smallest ? ms : min(ms, tailMs + ms * smallestSamples / Double(max(samples, 1)))
+        let affordable = Double(iter.maxIter) * budgetMs / max(smallestMs, 0.1)
+        affordableIterations = Int(min(affordable, Double(IterationTuner.ceiling)))
         var next = IterationTuner.adjust(maxIter: iter.maxIter, stats: stats, samples: samples)
         var overBudget = false
-        if fullFrameMs > 1200 {
-            let affordable = Int(Double(iter.maxIter) * max(1.0 / 16, 600 / fullFrameMs))
-            next = min(next, iter.maxIter, max(IterationTuner.floor, affordable))
+        if smallest && ms > 2 * budgetMs {
+            next = min(next, iter.maxIter, max(IterationTuner.floor, Int(max(Double(iter.maxIter) / 16, affordable))))
             overBudget = next < iter.maxIter
-        } else if next > iter.maxIter,
-                  IterationTuner.grownCost(fullFrameMs, stats: stats, samples: samples, maxIter: iter.maxIter, next: next) > 600 {
+        } else if next > iter.maxIter, Double(next) > affordable {
             next = iter.maxIter
         }
         let now = CACurrentMediaTime()
