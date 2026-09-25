@@ -179,6 +179,8 @@ public final class Camera: @unchecked Sendable {
     private var flightTime = 0.0
     public var minLog2Radius = -60_000.0
     public var maxLog2Radius = 3.0
+    /// Rates (per second) at which animated zooms and rotations settle and flings slow down.
+    public static let zoomEasing = 14.0, rotationEasing = 12.0, panFriction = 4.5
 
     public init(view: Viewport) {
         self.view = view.normalizedPrecision()
@@ -279,7 +281,7 @@ public final class Camera: @unchecked Sendable {
             return true
         }
         if abs(zoomRemaining) > 1e-4 {
-            let step = zoomRemaining * (1 - exp(-dt * 14))
+            let step = zoomRemaining * (1 - exp(-dt * Camera.zoomEasing))
             zoomRemaining -= step
             if abs(zoomRemaining) <= 1e-4 {
                 applyZoom(step + zoomRemaining, at: anchorPixel ?? SIMD2(Double(width), Double(height)) * 0.5,
@@ -292,13 +294,13 @@ public final class Camera: @unchecked Sendable {
         }
         if simd_length(velocity) > 2 {
             pan(pixels: velocity * dt, width: width, height: height)
-            velocity *= exp(-dt * 4.5)
+            velocity *= exp(-dt * Camera.panFriction)
             changed = true
         } else {
             velocity = .zero
         }
         if abs(rotationRemaining) > 1e-4 {
-            let step = rotationRemaining * (1 - exp(-dt * 12))
+            let step = rotationRemaining * (1 - exp(-dt * Camera.rotationEasing))
             rotationRemaining -= step
             view.rotation += step
             changed = true

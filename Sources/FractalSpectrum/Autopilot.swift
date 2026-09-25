@@ -22,6 +22,15 @@ final class Autopilot {
     private var dwellUntil = 0.0
     /// After backing out, targets away from the centre are preferred for a while.
     private var exploreUntil = 0.0
+    private var backOutUntil = 0.0
+    // Motion eases towards what the dive calls for, so new targets, pauses and back-outs never jolt
+    // the view: pan and zoom velocity, spin, and the zoom's fixed point (`aim`, kept as an offset
+    // from the target's position so that it glides when the target changes).
+    private var panVelocity = SIMD2<Double>(0, 0)
+    private var zoomVelocity = 0.0
+    private var spinVelocity = 0.0
+    private var aimOffset = SIMD2<Double>(0, 0)
+    private var aimedAt: SIMD2<Double>?
     private var searching = false
     /// Incremented by `reset`, so that searches started before it are ignored.
     private var session = 0
@@ -46,6 +55,12 @@ final class Autopilot {
         visitedPeriod = 0
         dwellUntil = 0
         exploreUntil = 0
+        backOutUntil = 0
+        panVelocity = .zero
+        zoomVelocity = 0
+        spinVelocity = 0
+        aimOffset = .zero
+        aimedAt = nil
         searching = false
         session += 1
     }
@@ -53,36 +68,61 @@ final class Autopilot {
     /// Advances the dive by one frame; false once the deepest supported zoom is reached.
     func step(dt: Double, flipY: Bool) -> Bool {
         let s = renderer.drawableSizeForPicking
-        let c = SIMD2(Double(s.x), Double(s.y)) * 0.5
+        let centre = SIMD2(Double(s.x), Double(s.y)) * 0.5
         let now = CACurrentMediaTime()
         if now - lastProbe > 0.3 {
             lastProbe = now
             renderer.probeRequested = true
         }
         let dwelling = now < dwellUntil
-        var anchor = c
+        // Where the dive heads: the target, or the minibrot's body while approaching one.
+        var goal = centre
         if !dwelling, let t = minibrot?.frame ?? target {
             let p = camera.view.pixel(of: t, width: s.x, height: s.y, flipY: flipY)
             if p.x < 0 || p.y < 0 || p.x > Double(s.x) || p.y > Double(s.y) {
                 if minibrot == nil { target = nil } else { minibrot = nil }
             } else {
-                anchor = p
-                camera.pan(pixels: (c - p) * min(1, dt * 0.9), width: s.x, height: s.y)
+                goal = p
             }
         }
-        if let m = minibrot {
-            camera.rotate(by: remainder(m.angle - camera.view.rotation, 2 * .pi) * min(1, dt * 0.8))
-            if camera.view.log2Radius <= m.log2Size + log2(1.5) {
-                onArrival?(m.period, m.log2Size)
-                visitedPeriod = m.period
-                minibrot = nil
-                target = nil
-                dwellUntil = now + 2.5
-            }
+        // A new goal keeps the aim where it was; the offset then fades, so the aim glides over.
+        if let last = aimedAt, simd_distance(last, goal) > 1 { aimOffset += last - goal }
+        aimOffset *= exp(-dt / 0.6)
+        let aim = goal + aimOffset
+        aimedAt = goal
+
+        panVelocity += ((centre - aim) * 0.9 - panVelocity) * ease(dt, over: 0.4)
+        camera.pan(pixels: panVelocity * dt, width: s.x, height: s.y)
+        let zoomGoal = now < backOutUntil ? -1.4 * speed : speed * (dwelling ? 0.15 : 1)
+        zoomVelocity += (zoomGoal - zoomVelocity) * ease(dt, over: 0.5)
+        // zooming about the aim holds it still, so the pan alone brings it to the centre
+        camera.zoom(log2Factor: -zoomVelocity * dt, at: aim, width: s.x, height: s.y, animated: false)
+        let spinGoal = minibrot.map { remainder($0.angle - camera.view.rotation, 2 * .pi) * 0.8 } ?? 0
+        spinVelocity += (spinGoal - spinVelocity) * ease(dt, over: 0.5)
+        camera.rotate(by: spinVelocity * dt)
+
+        if let m = minibrot, camera.view.log2Radius <= m.log2Size + log2(1.5) {
+            onArrival?(m.period, m.log2Size)
+            visitedPeriod = m.period
+            minibrot = nil
+            target = nil
+            dwellUntil = now + 2.5
         }
-        camera.zoom(log2Factor: -speed * (dwelling ? 0.15 : 1) * dt, at: anchor, width: s.x, height: s.y, animated: false)
         return camera.view.log2Radius > camera.minLog2Radius + 0.01
     }
+
+    /// Hands the dive's momentum to the camera's own easing, so that stopping slows down smoothly:
+    /// each eased remainder starts out at the dive's current velocity.
+    func coast() {
+        let s = renderer.drawableSizeForPicking
+        let aim = aimedAt.map { $0 + aimOffset } ?? SIMD2(Double(s.x), Double(s.y)) * 0.5
+        camera.fling(velocity: panVelocity)
+        camera.zoom(log2Factor: -zoomVelocity / Camera.zoomEasing, at: aim, width: s.x, height: s.y, animated: true)
+        camera.rotate(by: spinVelocity / Camera.rotationEasing, animated: true)
+    }
+
+    /// Share of the way an eased quantity covers in `dt` when it settles over about `seconds`.
+    private func ease(_ dt: Double, over seconds: Double) -> Double { 1 - exp(-dt / seconds) }
 
     /// Picks the next target from a probe of the preview's escape iterations.
     func steer(with probe: LiveRenderer.Probe, formula: Formula) {
@@ -113,7 +153,6 @@ final class Autopilot {
                 }
             }
         }
-        let s = renderer.drawableSizeForPicking
         let now = CACurrentMediaTime()
         // A minibrot just shown fills much of the view; give the dive time to leave it.
         if now > dwellUntil + 3, escaped.count < gw * gh / 20 || Double(gw * gh - escaped.count) > Double(gw * gh) * 0.6
@@ -121,7 +160,7 @@ final class Autopilot {
             // mostly interior, noise or nothing to follow: back out and look elsewhere
             target = nil
             exploreUntil = now + 3
-            camera.zoom(log2Factor: 1.2, at: SIMD2(Double(s.x), Double(s.y)) * 0.5, width: s.x, height: s.y, animated: true)
+            backOutUntil = now + 0.9
             return
         }
         if formula.family == .mandelbrot, formula.effectivePower == 2, !formula.julia, !searching, now > dwellUntil {
@@ -159,8 +198,18 @@ final class Autopilot {
                 candidates.append((score, gx, gy))
             }
         }
-        // A random pick among the best few varies the path.
-        guard let b = candidates.sorted(by: { $0.score > $1.score }).prefix(4).randomElement() else { return }
+        let ranked = candidates.sorted { $0.score > $1.score }
+        guard let best = ranked.first else { return }
+        // Keep the target while it is nearly as good as the best: switching goals is what makes a
+        // dive wander. Otherwise a random pick among the best few varies the path.
+        if let t = target {
+            let px = probe.view.pixel(of: t, width: probe.drawable.x, height: probe.drawable.y, flipY: formula.family.flipY)
+            let gx = Int(px.x * Double(probe.width) / Double(probe.drawable.x)) / step
+            let gy = Int(px.y * Double(probe.width) / Double(probe.drawable.x)) / step
+            if let current = candidates.first(where: { abs($0.x - gx) <= 1 && abs($0.y - gy) <= 1 }),
+               current.score > best.score - 0.3 { return }
+        }
+        guard let b = ranked.prefix(4).randomElement() else { return }
         target = point(gridX: Double(b.x), gridY: Double(b.y), cell: step, probe: probe, flipY: formula.family.flipY)
     }
 

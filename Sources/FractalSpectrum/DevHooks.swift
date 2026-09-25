@@ -58,8 +58,10 @@ final class DevHooks {
                 model.renderer.recordFrames = true
             } else {
                 model.renderer.recordFrames = false
-                let lines = model.renderer.frameLog.map { String(format: "%.4f,%.3f,%.3f", $0.t, $0.gpuMs, $0.scale) }
-                try? (["t,gpu_ms,scale"] + lines).joined(separator: "\n").write(toFile: arg, atomically: true, encoding: .utf8)
+                let lines = model.renderer.frameLog.map {
+                    String(format: "%.4f,%.3f,%.3f,%.5f,%.3f,%.3f", $0.t, $0.gpuMs, $0.scale, $0.log2Radius, $0.pan.x, $0.pan.y)
+                }
+                try? (["t,gpu_ms,scale,log2r,pan_x,pan_y"] + lines).joined(separator: "\n").write(toFile: arg, atomically: true, encoding: .utf8)
                 let slow = model.renderer.slowFrames.map { String(format: "%.4f,%.1f,%@", $0.t, $0.cpuMs, $0.note) }
                 try? slow.joined(separator: "\n").write(toFile: arg + ".slow", atomically: true, encoding: .utf8)
                 let passes = model.renderer.passLog.map { String(format: "%.4f,%.2f,%d,%@", $0.t, $0.ms, $0.samples, $0.note) }

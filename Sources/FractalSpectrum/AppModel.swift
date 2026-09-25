@@ -51,7 +51,7 @@ final class AppModel {
     let export = ExportController()
     var autopilot = false {
         didSet {
-            if autopilot { camera.cancelFlight() }
+            if autopilot { camera.cancelFlight() } else if oldValue { pilot.coast() }
             pilot.reset()
         }
     }

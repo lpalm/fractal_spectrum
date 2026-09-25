@@ -144,6 +144,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
 
     func resetFrameLog() {
         frameLog.removeAll()
+        loggedView = nil
         slowFrames.removeAll()
         passLog.removeAll()
     }
@@ -329,7 +330,13 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         }
         presentedCameraVersion = camera.version
         presentedFrontVersion = frontVersion
-        if recordFrames { frameLog.append((now, lastGpuMs, previewScale)) }
+        if recordFrames {
+            // camera motion since the previous presented frame: zoom, and where its centre went on screen
+            let pan = loggedView.map { camera.view.pixel(of: $0.center, width: size.x, height: size.y, flipY: camera.flipY)
+                - SIMD2(Double(size.x), Double(size.y)) * 0.5 } ?? .zero
+            frameLog.append((now, lastGpuMs, previewScale, camera.view.log2Radius, pan))
+            loggedView = camera.view
+        }
     }
 
     /// Renders what is currently on screen into an image (snapshots).
@@ -597,7 +604,8 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
 
     /// Frame rate over the last second of camera motion; holds the last value at rest.
     private var shownFps = 0.0
-    private(set) var frameLog: [(t: Double, gpuMs: Double, scale: Double)] = []
+    private(set) var frameLog: [(t: Double, gpuMs: Double, scale: Double, log2Radius: Double, pan: SIMD2<Double>)] = []
+    private var loggedView: Viewport?
     /// Draw calls whose CPU time exceeded 12 ms, with the kind of work submitted.
     private(set) var slowFrames: [(t: Double, cpuMs: Double, note: String)] = []
     /// Compute passes: submit time, GPU ms of the iteration, samples, description.
