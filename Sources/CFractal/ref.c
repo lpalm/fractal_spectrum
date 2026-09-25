@@ -1,11 +1,13 @@
+// Reference orbits: z -> f(z) + c at arbitrary precision, stored as floats and in extended range for
+// the GPU; and the full-precision CPU oracle used for verification.
 #include <mpfr.h>
 #include <math.h>
 #include <float.h>
 #include <stdlib.h>
-#include "CFractal.h"
-
 #include "internal.h"
 
+// The orbit's current point z = (x, y) and constant c = (cx, cy), scratch values t0-t5, and double
+// copies of both (dx, dy, dcx, dcy) that replace MPFR while 53 bits suffice.
 struct FSRefJob {
     int formula, power, julia, useDouble, escaped;
     long prec, count;
@@ -52,7 +54,8 @@ void fs_ref_free(FSRefJob *j) {
 
 int fs_ref_escaped(const FSRefJob *j) { return j->escaped; }
 
-static inline float flush(double v) {
+// v as a float, zero below the normal float range.
+static inline float to_float(double v) {
     return fabs(v) < (double)FLT_MIN ? 0.0f : (float)v;
 }
 
@@ -71,13 +74,14 @@ static inline void store_point(long n, double mx, long ex, double my, long ey, f
         double sy = ldexp(my, (int)(ey - e));
         r.m = (fs_float2){(float)sx, (float)sy};
         r.e = (int)e;
-        zf[n] = (fs_float2){flush(ldexp(mx, (int)(ex < -2000 ? -2000 : ex))),
-                            flush(ldexp(my, (int)(ey < -2000 ? -2000 : ey)))};
+        zf[n] = (fs_float2){to_float(ldexp(mx, (int)(ex < -2000 ? -2000 : ex))),
+                            to_float(ldexp(my, (int)(ey < -2000 ? -2000 : ey)))};
     }
     r.pad = 0;
     zx[n] = r;
 }
 
+// One iteration at full precision.
 static void step_mpfr(FSRefJob *j) {
     switch (j->formula) {
     case FS_FORMULA_MANDEL:
@@ -126,6 +130,7 @@ static void step_mpfr(FSRefJob *j) {
     }
 }
 
+// One iteration in doubles.
 static inline void step_double(FSRefJob *j) {
     double x = j->dx, y = j->dy;
     switch (j->formula) {

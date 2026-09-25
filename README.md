@@ -43,7 +43,7 @@ swift build -c release --product fscli
 | L | Relief lighting |
 | Space | Hide the interface |
 | F | Full screen |
-| ? | Shortcuts |
+| ? / Esc | Show / hide the shortcuts |
 | ⌘S / ⌘E | Export image / zoom video |
 | ⌘[ / ⌘] | Back / forward through visited views |
 | ⇧⌘C / ⌘L | Copy / go to coordinates |
@@ -63,10 +63,21 @@ swift build -c release --product fscli
 - **Progressive rendering.** Each display frame reprojects the latest finished image to the camera
   (on its own command queue); compute passes render a resolution-budgeted preview while moving,
   then full-resolution tiles and jittered anti-aliasing samples at rest.
-- **Colour.** Smooth iteration counts through OKLab-interpolated palettes, relief lighting from the
-  distance estimate, colour normalisation that follows the view's iteration range.
+- **Colour.** Smooth iteration counts through OKLab-interpolated palettes, with relief lighting from
+  the distance estimate. Colours stay attached to the plane while zooming; only in deep views, whose
+  escape times differ by a tiny fraction, does the start of the palette rise with the zoom.
 - **Staying interactive.** The iteration limit follows the view but is capped so that even the
   smallest preview fits a display frame; exports run in short GPU chunks while the view moves.
 - **Autopilot.** Steers by the preview's iteration map towards detailed boundary, away from interior
   and noise, and in the Mandelbrot set locks onto minibrots found by period detection, Newton's
   method and size and shape estimates.
+
+## Code map
+
+- `Sources/CFractal`: MPFR numbers, reference orbits, minibrot location, and the structs shared with
+  the shaders (`ShaderTypes.h`).
+- `Sources/FractalKit`: the renderer. `Shaders/Fractal.metal` (compiled at launch), `Engine` (passes
+  and colouring), reference orbits and BLA tables, the camera and its flights, image and video export.
+- `Sources/FractalSpectrum`: the app. `LiveRenderer` (progressive rendering at display rate),
+  `AppModel` (state and actions), the SwiftUI views, the autopilot and the tour.
+- `Sources/fscli`: headless rendering, verification against a full-precision CPU iteration, benchmarks.

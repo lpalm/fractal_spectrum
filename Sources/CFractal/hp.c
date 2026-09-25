@@ -1,7 +1,7 @@
+// Arbitrary-precision real numbers for Swift: a thin layer over MPFR.
 #include <mpfr.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdio.h>
 #include "internal.h"
 
 FSHP *fs_hp_new(long prec) {
