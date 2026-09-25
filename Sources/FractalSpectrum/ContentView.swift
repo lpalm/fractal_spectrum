@@ -28,6 +28,12 @@ struct ContentView: View {
                 .transition(.opacity)
             }
 
+            if let orbit = model.orbitHover {
+                OrbitOverlay(orbit: orbit)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
+
             if let hover = model.juliaHover {
                 GeometryReader { geo in
                     JuliaInset(hover: hover, formula: model.formula, color: model.color, canvas: geo.size)
@@ -729,6 +735,7 @@ struct HelpOverlay: View {
         ("Double-click / right-click", "Zoom in / out"),
         ("Rotate gesture · Q / E", "Rotate"),
         ("Hold ⌥ / ⌥-click", "Preview / open the Julia set at the pointer"),
+        ("Hold ⇧", "Orbit of the point under the pointer"),
         ("J", "Toggle Julia set"),
         ("C / X", "Next / previous palette"),
         ("[ / ]", "Halve / double iterations"),

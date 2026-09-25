@@ -87,6 +87,12 @@ final class DevHooks {
                 try? text.write(toFile: arg, atomically: true, encoding: .utf8)
             }
         case "where": try? model.coordinatesText.write(toFile: arg, atomically: true, encoding: .utf8)
+        case "orbit":
+            // orbit:x,y shows the orbit at drawable pixel (x, y) as if ⇧ were held there; orbit:off hides it
+            let v = arg.split(separator: ",").compactMap { Double($0) }
+            let points = NSApp.windows.first { $0.isVisible }?.contentView?.bounds.width ?? 1
+            let scale = Double(model.renderer.drawableSizeForPicking.x) / max(Double(points), 1)
+            if v.count == 2 { model.showOrbit(atPixel: SIMD2(v[0], v[1]), scale: scale) } else { model.orbitHover = nil }
         case "hover":
             // hover:x,y,re,im shows the Julia preview as if ⌥ were held at canvas point (x, y); hover:off hides it
             let v = arg.split(separator: ",").compactMap { Double($0) }

@@ -342,3 +342,23 @@ final class BLATable {
         }
     }
 }
+
+extension Formula {
+    /// The first `count` points of the orbit of `point` (z_0 = 0 with c = point, or z_0 = point in a
+    /// Julia set), in double precision, ending early once |z| exceeds 4 (for display).
+    public func orbit(of point: PlanePoint, count: Int) -> [SIMD2<Float>] {
+        let p = point.withPrecision(53)
+        let job: OpaquePointer
+        if julia {
+            let jre = HPFloat(juliaRe, precision: 53), jim = HPFloat(juliaIm, precision: 53)
+            job = fs_ref_new(family.formulaID, Int32(effectivePower), 1, nil, nil, p.re.ptr, p.im.ptr, jre.ptr, jim.ptr, 53)
+        } else {
+            job = fs_ref_new(family.formulaID, Int32(effectivePower), 0, p.re.ptr, p.im.ptr, nil, nil, nil, nil, 53)
+        }
+        defer { fs_ref_free(job) }
+        var zf = [SIMD2<Float>](repeating: .zero, count: count)
+        var zx = [FSRefExt](repeating: FSRefExt(), count: count)
+        let n = fs_ref_run(job, count, &zf, &zx, 16, nil, nil)
+        return Array(zf.prefix(n))
+    }
+}

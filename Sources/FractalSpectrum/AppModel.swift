@@ -58,6 +58,8 @@ final class AppModel {
     @ObservationIgnored let pilot: Autopilot
     /// Julia parameter under the pointer while ⌥ is held over the Mandelbrot set.
     var juliaHover: JuliaHover?
+    /// Orbit of the point under the pointer while ⇧ is held.
+    var orbitHover: OrbitHover?
     var cycleColors = false
     /// Extended dynamic range output on HDR-capable displays.
     var hdr = UserDefaults.standard.object(forKey: "hdr") as? Bool ?? true {
@@ -314,6 +316,12 @@ final class AppModel {
         show("Mini-Mandelbrot of period \(period.formatted()) · " + ScaleFact.magnification((1 - log2Size) * log10(2.0)), duration: 2.5)
     }
 
+    /// Shows the orbit of the point at drawable pixel `p` (`scale`: pixels per point).
+    func showOrbit(atPixel p: SIMD2<Double>, scale: Double) {
+        orbitHover = OrbitHover(formula: formula, view: camera.view, cameraVersion: camera.version, pixel: p,
+                                drawable: renderer.drawableSizeForPicking, scale: scale)
+    }
+
     func toggleJulia() {
         var f = formula
         f.julia.toggle()
@@ -500,6 +508,7 @@ final class AppModel {
             color.offset = (color.offset + dt * cycleSpeed).truncatingRemainder(dividingBy: 1)
         }
         if autopilot && !pilot.step(dt: dt, flipY: formula.family.flipY) { autopilot = false }
+        if let o = orbitHover, o.cameraVersion != camera.version { showOrbit(atPixel: o.pixel, scale: o.scale) }
     }
 
     private func formulaChanged(from old: Formula) {

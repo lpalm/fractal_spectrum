@@ -69,15 +69,33 @@ final class FractalMTKView: MTKView {
                                        owner: self))
     }
 
-    override func mouseMoved(with e: NSEvent) { updateJuliaHover(option: e.modifierFlags.contains(.option)) }
+    override func mouseMoved(with e: NSEvent) { updateHover(e.modifierFlags) }
 
-    override func mouseExited(with e: NSEvent) { model?.juliaHover = nil }
+    override func mouseExited(with e: NSEvent) {
+        model?.juliaHover = nil
+        model?.orbitHover = nil
+    }
 
     override func flagsChanged(with e: NSEvent) {
         super.flagsChanged(with: e)
-        let option = e.modifierFlags.contains(.option)
-        if !option { hoverSuppressed = false }
-        updateJuliaHover(option: option)
+        if !e.modifierFlags.contains(.option) { hoverSuppressed = false }
+        updateHover(e.modifierFlags)
+    }
+
+    private func updateHover(_ flags: NSEvent.ModifierFlags) {
+        updateJuliaHover(option: flags.contains(.option))
+        updateOrbit(shift: flags.contains(.shift) && !flags.contains(.command))
+    }
+
+    /// Shows the orbit of the point under the pointer while ⇧ is held.
+    private func updateOrbit(shift: Bool) {
+        guard let model, let window else { return }
+        let p = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        guard shift, bounds.contains(p) else {
+            if model.orbitHover != nil { model.orbitHover = nil }
+            return
+        }
+        model.showOrbit(atPixel: pixel(p), scale: scale)
     }
 
     /// Shows the Julia set of the parameter under the pointer while ⌥ is held over the Mandelbrot set.

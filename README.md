@@ -30,6 +30,7 @@ swift build -c release --product fscli
 | Double-click / right-click | Zoom in / out |
 | Rotate gesture, Q / E | Rotate |
 | Hold ⌥ / ⌥-click | Preview / open the Julia set of the point under the pointer |
+| Hold ⇧ | Orbit of the point under the pointer |
 | T | Guided tour |
 | P | Autopilot: endless dive along intricate boundary detail, stopping at minibrots on the way (, / . for speed) |
 | M | Find the nearest mini-Mandelbrot in view and fly to it |
