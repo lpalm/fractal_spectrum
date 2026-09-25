@@ -66,6 +66,9 @@ struct ContentView: View {
         .animation(.spring(duration: 0.6), value: model.caption)
         .preferredColorScheme(.dark)
         .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                model.show("Scroll to zoom · T for a guided tour · ? for shortcuts", duration: 4)
+            }
             for f in FractalFamily.allCases {
                 var c = ColorSettings()
                 c.palette = [.mandelbrot: 0, .tricorn: 4, .burningShip: 7, .celtic: 2][f] ?? 0
@@ -101,6 +104,7 @@ struct Sidebar: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
+            Spacer().frame(height: 14)   // clear the window's traffic-light buttons
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text("Spectrum")
                     .font(.system(size: 26, weight: .bold, design: .rounded))
@@ -413,6 +417,7 @@ struct QualitySection: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            .help("Fast: no smoothing, loosest approximation · Balanced: 4× · High: 16× · Ultra: 64× smoothing with exact approximation")
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Iterations")

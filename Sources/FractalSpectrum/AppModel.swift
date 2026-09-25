@@ -358,11 +358,11 @@ final class AppModel {
         show(color.lightStrength > 0 ? "Lighting on" : "Lighting off")
     }
 
-    func show(_ message: String) {
+    func show(_ message: String, duration: Double = 1.6) {
         toast = message
         toastTask?.cancel()
         toastTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(1.6))
+            try? await Task.sleep(for: .seconds(duration))
             if !Task.isCancelled { self?.toast = nil }
         }
     }

@@ -104,6 +104,8 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     private var statsSettled = true
     private var previewScale = 1.0
     private var computeBusy = false
+    /// Incremented when surfaces are reallocated; passes encoded for older surfaces don't publish.
+    private var surfaceGeneration = 0
 
     // Timing
     private var costMsPerMSample = 20.0
@@ -254,16 +256,17 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
             }
         }
         let drawable = size
+        let generation = surfaceGeneration
         cbColor.addCompletedHandler { [weak self] _ in
             DispatchQueue.main.async {
                 guard let self else { return }
-                if let (pw, ph, v) = probeInfo, let buf = self.probeBuffer {
+                if let (pw, ph, v) = probeInfo, let buf = self.probeBuffer, generation == self.surfaceGeneration {
                     let raw = buf.contents().assumingMemoryBound(to: UInt32.self)
                     let its = (0..<(pw * ph)).map { raw[$0 * 4] }
                     self.onProbe?(Probe(width: pw, height: ph, view: v, drawable: drawable, iterations: its))
                 }
                 self.computeBusy = false
-                if produced && self.display.count == 2 {
+                if produced && self.display.count == 2 && generation == self.surfaceGeneration {
                     self.front = back
                     self.frontView = publishedView
                     self.frontVersion += 1
@@ -333,6 +336,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
 
     private func resize(_ sz: SIMD2<Int>) {
         size = sz
+        surfaceGeneration += 1
         let n = sz.x * sz.y
         gPreview = engine.makeGBuffer(samples: n)
         gFull = engine.makeGBuffer(samples: n)
