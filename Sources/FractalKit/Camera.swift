@@ -96,6 +96,12 @@ public struct Flight: @unchecked Sendable {
     private let r0: Double, r1: Double
     /// Centres too close to matter: the flight only zooms.
     private let pureZoom: Bool
+    /// Path speed (per second) of a flight held to a top zoom speed, which it keeps between speeding up
+    /// over its first `ramp` seconds and slowing down over its last; nil for a flight eased over its
+    /// whole length.
+    private let cruiseSpeed: Double?
+    /// Seconds a flight held to a top zoom speed takes to reach it, and to slow down from it.
+    static let ramp = 2.5
 
     /// A flight from `a` to `b`, taking `duration` seconds or a length fitted to its path, but never
     /// zooming faster than `maxZoomSpeed` doublings per second.
@@ -129,9 +135,34 @@ public struct Flight: @unchecked Sendable {
             r1 = -asinhOf(n1, lnDen: log(2 * rho2) + lnW1)
             pathLength = (r1 - r0) / rho
         }
-        // The zoom changes by at most rho natural-log units per unit of path, and the easing's steepest
-        // slope is 15/8 of its average: the zoom speed peaks at 15/8 rho pathLength / duration.
-        self.duration = max(duration ?? min(14, max(1.2, 0.55 * pathLength)), 1.875 * rho * pathLength / (log(2.0) * maxZoomSpeed))
+        // The zoom changes by at most rho natural-log units per unit of path, so a top zoom speed is a
+        // top path speed; eased over its whole length, a flight peaks at 15/8 of its average speed.
+        let topSpeed = maxZoomSpeed * log(2.0) / rho
+        let eased = duration ?? min(14, max(1.2, 0.55 * pathLength))
+        if 1.875 * pathLength / eased <= topSpeed {
+            self.duration = eased
+            cruiseSpeed = nil
+        } else if pathLength / topSpeed >= Flight.ramp {
+            self.duration = pathLength / topSpeed + Flight.ramp
+            cruiseSpeed = topSpeed
+        } else {
+            // too short to cruise: eased over its whole length, just slowly enough
+            self.duration = 1.875 * pathLength / topSpeed
+            cruiseSpeed = nil
+        }
+    }
+
+    /// Share of the path covered at normalised time t in [0, 1].
+    private func covered(at t: Double) -> Double {
+        let t = min(max(t, 0), 1)
+        guard let speed = cruiseSpeed else { return smootherstep(t) }
+        // the speed ramps along smoothstep, covering half the distance of as long a cruise
+        let ramp = Flight.ramp, seconds = t * duration
+        func ramped(_ x: Double) -> Double { speed * ramp * x * x * x * (1 - x / 2) }
+        let distance = seconds < ramp ? ramped(seconds / ramp)
+            : seconds > duration - ramp ? pathLength - ramped((duration - seconds) / ramp)
+            : speed * (seconds - ramp / 2)
+        return distance / pathLength
     }
 
     private static func lncosh(_ x: Double) -> Double { abs(x) + log1p(exp(-2 * abs(x))) - log(2.0) }
@@ -142,7 +173,7 @@ public struct Flight: @unchecked Sendable {
 
     /// View at normalised time t in [0, 1], eased in and out.
     public func view(at t: Double) -> Viewport {
-        let e = smootherstep(min(max(t, 0), 1))
+        let e = covered(at: t)
         let s = e * pathLength
         var view = end
         view.rotation = start.rotation + (end.rotation - start.rotation) * e
