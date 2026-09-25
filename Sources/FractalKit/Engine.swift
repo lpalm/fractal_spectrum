@@ -579,7 +579,7 @@ extension Engine {
     }
 
     /// An sRGB image of RGBX pixels.
-    static func makeImage(pixels: [UInt8], width: Int, height: Int) -> CGImage? {
+    public static func makeImage(pixels: [UInt8], width: Int, height: Int) -> CGImage? {
         guard let provider = CGDataProvider(data: Data(pixels) as CFData) else { return nil }
         return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
                        space: CGColorSpace(name: CGColorSpace.sRGB)!,

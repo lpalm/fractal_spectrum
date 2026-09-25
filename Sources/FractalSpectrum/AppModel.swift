@@ -41,7 +41,7 @@ final class AppModel {
     var iter = IterationSettings() { didSet { renderer.iter = iter } }
     var quality = Quality.high {
         didSet {
-            renderer.aaSamples = quality.samples
+            renderer.samplesPerPixel = quality.samples
             iter.blaLog2Eps = quality.blaLog2Eps
         }
     }
@@ -112,7 +112,7 @@ final class AppModel {
         iter.blaLog2Eps = quality.blaLog2Eps
         renderer.iter = iter
         renderer.color = color
-        renderer.aaSamples = quality.samples
+        renderer.samplesPerPixel = quality.samples
         renderer.onStatus = { [weak self] s in MainActor.assumeIsolated { self?.status = s } }
         renderer.onRecordingInterrupted = { [weak self] in
             MainActor.assumeIsolated { self?.stopRecording(note: "Recording stopped: the window changed size") }
@@ -260,7 +260,7 @@ final class AppModel {
     }
 
     func zoomStep(_ log2Factor: Double) {
-        let s = renderer.drawableSizeForPicking
+        let s = renderer.drawableSize
         camera.zoom(log2Factor: log2Factor, at: SIMD2(Double(s.x), Double(s.y)) * 0.5, width: s.x, height: s.y, animated: true)
     }
 
@@ -323,7 +323,7 @@ final class AppModel {
     /// Shows the orbit of the point at drawable pixel `p` (`scale`: pixels per point).
     func showOrbit(atPixel p: SIMD2<Double>, scale: Double) {
         orbitHover = OrbitHover(formula: formula, view: camera.view, cameraVersion: camera.version, pixel: p,
-                                drawable: renderer.drawableSizeForPicking, scale: scale)
+                                drawable: renderer.drawableSize, scale: scale)
     }
 
     func toggleJulia() {
@@ -342,7 +342,7 @@ final class AppModel {
     }
 
     func pickJulia(atPixel p: SIMD2<Double>) {
-        let s = renderer.drawableSizeForPicking
+        let s = renderer.drawableSize
         let c = camera.view.point(atPixel: p, width: s.x, height: s.y, flipY: formula.family.flipY)
         var f = formula
         f.julia = true
@@ -406,7 +406,7 @@ final class AppModel {
         let dir = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
         let url = file ?? dir.appendingPathComponent(ExportController.defaultName("Spectrum Recording", "mp4"))
         do {
-            renderer.recorder = try LiveRecorder(url: url, drawable: renderer.drawableSizeForPicking)
+            renderer.recorder = try LiveRecorder(url: url, drawable: renderer.drawableSize)
             recordingSince = Date()
             show("Recording · ⌘R to stop")
         } catch {

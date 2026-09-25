@@ -87,9 +87,9 @@ final class DevHooks {
             try? "running=\(e.running) progress=\(e.progress) status=\(e.status)".write(toFile: arg, atomically: true, encoding: .utf8)
         case "status":
             if let s = model.status {
-                let d = model.renderer.drawableSizeForPicking
+                let d = model.renderer.drawableSize
                 let text = String(format: "zoom=%@ iter=%d fps=%.1f gpu=%.2f stage=%@ samples=%d perturbed=%@ drawable=%dx%d",
-                                  s.view.zoomText, s.maxIter, s.fps, s.gpuMs, s.stage, s.samples, "\(s.perturbed)", d.x, d.y)
+                                  s.view.zoomText, s.maxIter, s.fps, s.gpuMs, s.stage.rawValue, s.samples, "\(s.perturbed)", d.x, d.y)
                 try? text.write(toFile: arg, atomically: true, encoding: .utf8)
             }
         case "where": try? model.coordinatesText.write(toFile: arg, atomically: true, encoding: .utf8)
@@ -97,7 +97,7 @@ final class DevHooks {
             // orbit:x,y shows the orbit at drawable pixel (x, y) as if ⇧ were held there; orbit:off hides it
             let v = arg.split(separator: ",").compactMap { Double($0) }
             let points = NSApp.windows.first { $0.isVisible }?.contentView?.bounds.width ?? 1
-            let scale = Double(model.renderer.drawableSizeForPicking.x) / max(Double(points), 1)
+            let scale = Double(model.renderer.drawableSize.x) / max(Double(points), 1)
             if v.count == 2 { model.showOrbit(atPixel: SIMD2(v[0], v[1]), scale: scale) } else { model.orbitHover = nil }
         case "hover":
             // hover:x,y,re,im shows the Julia preview as if ⌥ were held at canvas point (x, y); hover:off hides it

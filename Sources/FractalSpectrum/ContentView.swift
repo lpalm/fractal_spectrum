@@ -551,7 +551,7 @@ struct HUDBar: View {
             item("bolt.fill", rateText(s?.iterationRate ?? 0), "effective iter / s")
             divider
             HStack(spacing: 7) {
-                ProgressRing(progress: s?.progress ?? 0, active: (s?.stage ?? "") != "Done")
+                ProgressRing(progress: s?.progress ?? 0, active: s?.stage != .done)
                     .frame(width: 14, height: 14)
                 Text(stageText(s))
                     .font(.system(size: 12, weight: .medium, design: .rounded))
@@ -600,10 +600,10 @@ struct HUDBar: View {
         guard let s else { return "Starting" }
         if let r = s.referenceProgress { return String(format: "Orbit %.0f%%", r * 100) }
         switch s.stage {
-        case "Refining": return String(format: "Refining %.0f%%", s.progress * 100)
-        case "Smoothing": return "Smoothing \(s.samples)×"
-        case "Done": return s.samples > 1 ? "Sharp · \(s.samples)×" : "Sharp"
-        default: return s.stage
+        case .refining: return String(format: "Refining %.0f%%", s.progress * 100)
+        case .smoothing: return "Smoothing \(s.samples)×"
+        case .done: return s.samples > 1 ? "Sharp · \(s.samples)×" : "Sharp"
+        case .preparing: return s.stage.rawValue
         }
     }
 

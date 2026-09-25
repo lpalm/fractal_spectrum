@@ -67,7 +67,7 @@ final class Autopilot {
 
     /// Advances the dive by one frame; false once the deepest supported zoom is reached.
     func step(dt: Double, flipY: Bool) -> Bool {
-        let s = renderer.drawableSizeForPicking
+        let s = renderer.drawableSize
         let centre = SIMD2(Double(s.x), Double(s.y)) * 0.5
         let now = CACurrentMediaTime()
         if now - lastProbe > 0.3 {
@@ -114,7 +114,7 @@ final class Autopilot {
     /// Hands the dive's momentum to the camera's own easing, so that stopping slows down smoothly:
     /// each eased remainder starts out at the dive's current velocity.
     func coast() {
-        let s = renderer.drawableSizeForPicking
+        let s = renderer.drawableSize
         let aim = aimedAt.map { $0 + aimOffset } ?? SIMD2(Double(s.x), Double(s.y)) * 0.5
         camera.fling(velocity: panVelocity)
         camera.zoom(log2Factor: -zoomVelocity / Camera.zoomEasing, at: aim, width: s.x, height: s.y, animated: true)

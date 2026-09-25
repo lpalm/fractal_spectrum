@@ -49,7 +49,7 @@ final class FractalMTKView: MTKView {
     /// Iteration budget per frame: most of the display's frame interval.
     private func updateFrameBudget() {
         let hz = Double(window?.screen?.maximumFramesPerSecond ?? 60)
-        model?.renderer.budgetMs = 1000 / max(hz, 30) * 0.72
+        model?.renderer.frameBudgetMs = 1000 / max(hz, 30) * 0.72
     }
 
     private var scale: Double { Double(window?.backingScaleFactor ?? 2) }
