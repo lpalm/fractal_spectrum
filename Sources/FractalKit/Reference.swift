@@ -212,13 +212,15 @@ final class BLATable {
     let entries: MTLBuffer
     let r2: MTLBuffer
     let logR: MTLBuffer
+    /// log2 of the smallest |Z| each approximation steps over.
+    let minZ: MTLBuffer
     let offsets: [UInt32]
     let counts: [UInt32]
     let log2C: Double
     let log2Eps: Double
     let refCount: Int
 
-    init?(encodingInto cb: MTLCommandBuffer, snapshot s: ReferenceOrbit.Snapshot, formula: Formula,
+    init?(encodingInto enc: MTLComputeCommandEncoder, snapshot s: ReferenceOrbit.Snapshot, formula: Formula,
           log2C: Double, log2Eps: Double) {
         let count0 = s.count - 2
         guard count0 >= 1 else { return nil }
@@ -243,6 +245,7 @@ final class BLATable {
         entries = device.makeBuffer(length: total * MemoryLayout<FSBLAEntry>.stride, options: .storageModePrivate)!
         r2 = device.makeBuffer(length: total * 4, options: .storageModePrivate)!
         logR = device.makeBuffer(length: total * 4, options: .storageModePrivate)!
+        minZ = device.makeBuffer(length: total * 4, options: .storageModePrivate)!
 
         let gpu = GPU.shared
         var key = GPU.PipelineKey(name: "bla_init")
@@ -251,12 +254,11 @@ final class BLATable {
         let initPSO = gpu.pipeline(key)
         key.name = "bla_merge"
         let mergePSO = gpu.pipeline(key)
-        guard let enc = cb.makeComputeCommandEncoder() else { return nil }
-        enc.label = "BLA build"
         enc.setBuffer(entries, offset: 0, index: 0)
         enc.setBuffer(r2, offset: 0, index: 1)
         enc.setBuffer(logR, offset: 0, index: 2)
         enc.setBuffer(s.zx, offset: 0, index: 3)
+        enc.setBuffer(minZ, offset: 0, index: 5)
         var p = FSBLABuildParams(count: UInt32(count0), srcOffset: 0, dstOffset: 0, srcCount: 0,
                                  log2Eps: Float(log2Eps), log2C: Float(max(log2C, -1e30)), pad0: 0, pad1: 0)
         enc.setBytes(&p, length: MemoryLayout<FSBLABuildParams>.stride, index: 4)
@@ -269,6 +271,5 @@ final class BLATable {
             enc.setBytes(&p, length: MemoryLayout<FSBLABuildParams>.stride, index: 4)
             gpu.dispatch1D(enc, mergePSO, count: Int(counts[k]))
         }
-        enc.endEncoding()
     }
 }

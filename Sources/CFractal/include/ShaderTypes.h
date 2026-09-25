@@ -32,6 +32,7 @@ typedef struct {
     fs_uint2 bufOrigin;     // sample stored at index 0 of the G-buffer
     fs_uint bufStride;      // G-buffer row length
     fs_uint pad0;
+    fs_uint2 workSize;      // rectangle of samples processed by this dispatch
     fs_float2 offsetM;      // mantissa of (view center - reference start); direct kernel: view center
     fs_float2 stepX;        // mantissa of the complex delta per +1 sample in x
     fs_float2 stepY;        // mantissa of the complex delta per +1 sample in y
@@ -85,13 +86,17 @@ typedef struct {
     fs_uint maxIter;        // highest escaped iteration
     fs_uint escaped;
     fs_uint lateEscaped;    // escaped in the upper half of the iteration limit
+    fs_uint unresolved;     // reached the limit without escaping or a detected cycle
+    fs_uint interior;       // attracting cycle detected
+    fs_uint pad0;
+    fs_uint pad1;
 } FSStats;
 
 // Parameters of the colouring kernel.
 typedef struct {
     fs_uint2 outSize;
     fs_uint2 gSize;         // primary G-buffer size
-    fs_uint2 fbSize;        // fallback G-buffer size
+    fs_uint2 fbSize;        // logical size of the fallback colour image
     fs_uint2 tileGrid;      // primary tiles per axis
     fs_uint tileSize;
     fs_uint useFallback;
@@ -116,14 +121,19 @@ typedef struct {
     float pad0;
 } FSColorParams;
 
+// Display pass: out pixel q (centred) samples the accumulator at A q + b (centred), divided by its sample count.
 typedef struct {
-    fs_uint2 size;
-    float invCount;
+    fs_uint2 size;          // output size
+    fs_uint2 srcSize;       // accumulator size
+    fs_float4 A;            // row-major 2x2
+    fs_float2 b;
+    fs_uint identity;       // 1: straight copy
     float ditherAmp;
     float exposure;
+    float vignette;
     float pad0;
     float pad1;
-    float pad2;
+    fs_float4 background;   // linear colour outside the source image
 } FSPresentParams;
 
 #endif

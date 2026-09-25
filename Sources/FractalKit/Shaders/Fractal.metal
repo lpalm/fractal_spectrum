@@ -299,7 +299,9 @@ inline GSample finish(bool escaped, uint n, float2 z, Der d, constant FSIterPara
         float lr = 0.5f * log2(r2);
         // DE = |z|^2 ln|z| / |g|  (in plane units), then in samples
         s.de = 2.0f * lr + log2(lr * M_LN2_F) - lg - P.log2Step;
-        s.normal = half2(normalize(g));
+        // gradient in screen axes (x right, y down) so lighting ignores view rotation
+        float2 gs = float2(dot(g, P.stepX), dot(g, P.stepY));
+        s.normal = half2(normalize(gs));
     } else {
         s.de = 0.0f;
         s.normal = half2(0.0h);
@@ -307,20 +309,34 @@ inline GSample finish(bool escaped, uint n, float2 z, Der d, constant FSIterPara
     return s;
 }
 
-// Folds per-thread results into the pass statistics with one atomic per SIMD group.
-inline void record_stats(device atomic_uint *stats, bool active, bool escaped, uint n, uint maxIter, uint slot) {
-    bool esc = active && escaped;
-    bool late = esc && n > maxIter / 2;
+
+// ---------------------------------------------------------------------------------------------
+// Output and statistics helpers
+
+inline void store_sample(device GSample *out, constant FSIterParams &P, uint2 pix, GSample g) {
+    out[(pix.y - P.bufOrigin.y) * P.bufStride + (pix.x - P.bufOrigin.x)] = g;
+}
+
+// Per-thread outcome folded into the pass statistics with one atomic per SIMD group.
+// status: 0 escaped, 1 interior (cycle detected), 2 unresolved (iteration limit reached).
+inline void record_stats(device atomic_uint *stats, bool active, uint status, uint n, uint maxIter, uint slot) {
+    bool esc = active && status == 0;
     uint lo = simd_min(esc ? n : 0xFFFFFFFFu);
     uint hi = simd_max(esc ? n : 0u);
     uint ce = simd_sum(esc ? 1u : 0u);
-    uint cl = simd_sum(late ? 1u : 0u);
-    if (simd_is_first() && ce > 0) {
-        device atomic_uint *s = stats + slot * 4;
-        atomic_fetch_min_explicit(s + 0, lo, memory_order_relaxed);
-        atomic_fetch_max_explicit(s + 1, hi, memory_order_relaxed);
-        atomic_fetch_add_explicit(s + 2, ce, memory_order_relaxed);
-        if (cl > 0) atomic_fetch_add_explicit(s + 3, cl, memory_order_relaxed);
+    uint cl = simd_sum(esc && n > maxIter / 2 ? 1u : 0u);
+    uint cu = simd_sum(active && status == 2 ? 1u : 0u);
+    uint ci = simd_sum(active && status == 1 ? 1u : 0u);
+    if (simd_is_first()) {
+        device atomic_uint *s = stats + slot * 8;
+        if (ce > 0) {
+            atomic_fetch_min_explicit(s + 0, lo, memory_order_relaxed);
+            atomic_fetch_max_explicit(s + 1, hi, memory_order_relaxed);
+            atomic_fetch_add_explicit(s + 2, ce, memory_order_relaxed);
+            atomic_fetch_add_explicit(s + 3, cl, memory_order_relaxed);
+        }
+        if (cu > 0) atomic_fetch_add_explicit(s + 4, cu, memory_order_relaxed);
+        if (ci > 0) atomic_fetch_add_explicit(s + 5, ci, memory_order_relaxed);
     }
 }
 
@@ -332,32 +348,30 @@ kernel void iterate_direct(device GSample *out [[buffer(0)]],
                            device atomic_uint *stats [[buffer(7)]],
                            uint2 gid [[thread_position_in_grid]]) {
     uint2 pix = gid + P.origin;
-    bool active = pix.x < P.size.x && pix.y < P.size.y;
+    bool active = gid.x < P.workSize.x && gid.y < P.workSize.y;
     float2 pp = float2(pix) + 0.5f + P.jitter - 0.5f * float2(P.size);
     float2 c = P.offsetM + scl(pp.x * P.stepX + pp.y * P.stepY, P.stepE);
     float2 z = JULIA ? c : float2(0.0f);
     if (JULIA) c = P.juliaC;
 
     uint n = 0;
-    bool escaped = false;
+    uint status = 2;
     Der d = der_init();
     uint maxIter = active ? P.maxIter : 0;
-
-    bool inside = false;
     if (IS_MANDEL && POWER == 2 && !JULIA) {
         // main cardioid and period-2 bulb
         float q = (c.x - 0.25f) * (c.x - 0.25f) + c.y * c.y;
-        inside = q * (q + (c.x - 0.25f)) <= 0.25f * c.y * c.y || (c.x + 1.0f) * (c.x + 1.0f) + c.y * c.y <= 0.0625f;
+        if (q * (q + (c.x - 0.25f)) <= 0.25f * c.y * c.y || (c.x + 1.0f) * (c.x + 1.0f) + c.y * c.y <= 0.0625f) {
+            maxIter = 0;
+            status = 1;
+        }
     }
-    if (inside) maxIter = 0;
-
     float2 zs = z;
     uint period = 8;
     float eps2 = max(scl(dot(P.stepX, P.stepX), 2 * P.stepE) * 1e-4f, 1e-24f);
     while (n < maxIter) {
-        float r2 = dot(z, z);
-        if (r2 > P.bailout2) {
-            escaped = true;
+        if (dot(z, z) > P.bailout2) {
+            status = 0;
             break;
         }
         if (WITH_DER) d = der_step(d, z);
@@ -365,7 +379,7 @@ kernel void iterate_direct(device GSample *out [[buffer(0)]],
         n++;
         float2 dz = z - zs;
         if (dot(dz, dz) < eps2) {
-            n = maxIter;
+            status = 1;
             break;
         }
         if (n == period) {
@@ -373,8 +387,9 @@ kernel void iterate_direct(device GSample *out [[buffer(0)]],
             period *= 2;
         }
     }
-    if (active) out[(pix.y - P.bufOrigin.y) * P.bufStride + (pix.x - P.bufOrigin.x)] = finish(escaped, n, z, d, P);
-    record_stats(stats, active, escaped, n, P.maxIter, P.statsSlot);
+    if (status == 2 && dot(z, z) > P.bailout2) status = 0;
+    if (active) store_sample(out, P, pix, finish(status == 0, status == 0 ? n : P.maxIter, z, d, P));
+    record_stats(stats, active, status, n, P.maxIter, P.statsSlot);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -388,86 +403,75 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
                             device const float *blaR2 [[buffer(5)]],
                             device const float *blaLogR [[buffer(6)]],
                             device atomic_uint *stats [[buffer(7)]],
+                            device const float *blaMinZ [[buffer(8)]],
                             uint2 gid [[thread_position_in_grid]]) {
     uint2 pix = gid + P.origin;
-    bool active = pix.x < P.size.x && pix.y < P.size.y;
+    bool active = gid.x < P.workSize.x && gid.y < P.workSize.y;
     float2 pp = float2(pix) + 0.5f + P.jitter - 0.5f * float2(P.size);
     fx dc = fx_add(fx{P.offsetM, P.offsetE}, fx{pp.x * P.stepX + pp.y * P.stepY, P.stepE});
     float2 dcA = scl(dc.m, dc.e);
-
-    // z_1 = Z_1 + dc
     uint n = 1, m = 1;
     bool ext = DEEP && dc.e < -60;
     float2 d = dcA;
     fx w = dc;
     Der der = der_init();
     if (WITH_DER) der.J = float4(1.0f, 0.0f, IS_MANDEL ? 0.0f : 0.0f, IS_MANDEL ? 0.0f : 1.0f);
-
     bool escaped = false;
     float2 zEsc = float2(0.0f);
     uint maxIter = active ? P.maxIter : 0;
     uint refEnd = P.refLen - 1;
-
+    float4 Jz = IS_MANDEL ? float4(1.0f, 0.0f, 0.0f, 0.0f) : float4(1.0f, 0.0f, 0.0f, 1.0f);
+    int jze = 0;
+    int jrec = 0;
+    float lrmin = 1e30f;
+    float rmin2 = 1e30f;
+    bool pendingRec = false;
+    bool inside = false;
     while (n <= maxIter) {
         float2 Z, z;
         FSRefExt Zr;
-        // ---- escape / rebase / precision-mode checks for z_n = Z_m + delta
+        fx zx = fx{float2(0.0f), FS_ZERO_EXP};
         if (!ext) {
             Z = Zf[m];
             z = Z + d;
             float r2 = dot(z, z);
-            if (r2 > P.bailout2) {
-                escaped = true;
-                zEsc = z;
-                break;
-            }
+            if (r2 > P.bailout2) { escaped = true; zEsc = z; break; }
             if (n == maxIter) break;
+            if (r2 < rmin2) {
+                float lz = 0.5f * log2(r2);
+                pendingRec = pendingRec || lz < lrmin - 1.0f;
+                lrmin = lz;
+                rmin2 = r2;
+            }
             float d2 = dot(d, d);
-            if (r2 < d2 || m >= refEnd) {
-                d = z;
-                m = 0;
-                Z = float2(0.0f);
-                d2 = r2;
-            }
-            if (DEEP && d2 < 0x1p-124f) {
-                ext = true;
-                w = fx_norm(d, 0);
-            }
+            if (r2 < d2 || m >= refEnd) { d = z; m = 0; Z = float2(0.0f); d2 = r2; }
+            if (DEEP && d2 < 0x1p-124f) { ext = true; w = fx_norm(d, 0); }
         }
         if (DEEP && ext) {
             Zr = Zx[m];
-            fx zx = fx_add(fx{Zr.m, Zr.e}, w);
+            zx = fx_add(fx{Zr.m, Zr.e}, w);
             if (zx.e > -40) {
                 float2 zz = scl(zx.m, zx.e);
-                if (dot(zz, zz) > P.bailout2) {
-                    escaped = true;
-                    zEsc = zz;
-                    break;
-                }
+                if (dot(zz, zz) > P.bailout2) { escaped = true; zEsc = zz; break; }
             }
             if (n == maxIter) break;
+            {
+                float lz = 0.5f * log2(max(dot(zx.m, zx.m), 1e-30f)) + float(zx.e);
+                if (lz < lrmin) {
+                    pendingRec = pendingRec || lz < lrmin - 1.0f;
+                    lrmin = lz;
+                    rmin2 = lz > -62.0f ? exp2(2.0f * lz) : 0.0f;
+                }
+            }
             bool rebase = m >= refEnd;
             if (!rebase && zx.e <= w.e + 1) {
                 int de2 = clamp(2 * (zx.e - w.e), -250, 2);
                 rebase = dot(zx.m, zx.m) * scl(1.0f, de2) < dot(w.m, w.m);
             }
-            if (rebase) {
-                w = zx;
-                m = 0;
-                Zr = FSRefExt{float2(0.0f), FS_ZERO_EXP, 0};
-            }
-            if (w.e > -60) {
-                ext = false;
-                d = scl(w.m, w.e);
-                Z = Zf[m];
-                z = Z + d;
-            } else {
-                Z = Zf[m];
-                z = Z + scl(w.m, w.e);
-            }
+            if (rebase) { w = zx; m = 0; Zr = FSRefExt{float2(0.0f), FS_ZERO_EXP, 0}; }
+            if (w.e > -60) { ext = false; d = scl(w.m, w.e); Z = Zf[m]; z = Z + d; }
+            else { Z = Zf[m]; z = Z + scl(w.m, w.e); }
         }
-
-        // ---- advance
         bool stepped = false;
         if (USE_BLA && m > 0) {
             uint j = m - 1;
@@ -498,11 +502,17 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
             }
             if (best >= 0) {
                 FSBLAEntry E = bla[idx];
-                if (!ext) {
-                    d = scl(matvec(E.A, d), E.Ae) + scl(matvec(E.B, dc.m), E.Be + dc.e);
-                } else {
-                    w = fx_add(fx{matvec(E.A, w.m), E.Ae + w.e}, fx{matvec(E.B, dc.m), E.Be + dc.e});
+                float lmz = blaMinZ[idx];
+                if (lmz < lrmin) {
+                    pendingRec = pendingRec || lmz < lrmin - 1.0f;
+                    lrmin = lmz;
+                    rmin2 = lmz > -62.0f ? exp2(2.0f * lmz) : 0.0f;
                 }
+                if (IS_MANDEL) Jz.xy = cmul(float2(E.A.x, E.A.z), Jz.xy);
+                else Jz = matmul(E.A, Jz);
+                jze += E.Ae;
+                if (!ext) d = scl(matvec(E.A, d), E.Ae) + scl(matvec(E.B, dc.m), E.Be + dc.e);
+                else w = fx_add(fx{matvec(E.A, w.m), E.Ae + w.e}, fx{matvec(E.B, dc.m), E.Be + dc.e});
                 if (WITH_DER) der = der_bla(der, E);
                 uint l = 1u << uint(best);
                 m += l;
@@ -513,17 +523,33 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
         if (!stepped) {
             if (WITH_DER) der = der_step(der, z);
             if (!ext) {
+                float4 M = jacobian(z);
+                if (IS_MANDEL) Jz.xy = cmul(float2(M.x, M.z), Jz.xy);
+                else Jz = matmul(M, Jz);
                 d = pert(Z, d) + dcA;
             } else {
+                float4 M = jacobian(zx.m);
+                if (IS_MANDEL) Jz.xy = cmul(float2(M.x, M.z), Jz.xy);
+                else Jz = matmul(M, Jz);
+                jze += (IS_MANDEL ? POWER - 1 : 1) * zx.e;
                 w = fx_add(pert_ext(Zr, w), dc);
             }
             m++;
             n++;
         }
+        float ja = max(max(abs(Jz.x), abs(Jz.y)), max(abs(Jz.z), abs(Jz.w)));
+        if (ja > 0.0f) {
+            int k = expo(ja);
+            Jz = scl(Jz, -k);
+            jze += k;
+            if (pendingRec) { jrec = jze; pendingRec = false; }
+            else if (jze - jrec < -16) { inside = true; break; }
+        }
     }
     if (escaped && n > maxIter) escaped = false;
-    if (active) out[(pix.y - P.bufOrigin.y) * P.bufStride + (pix.x - P.bufOrigin.x)] = finish(escaped, n, zEsc, der, P);
-    record_stats(stats, active, escaped, n, P.maxIter, P.statsSlot);
+    uint status = escaped ? 0u : (inside ? 1u : 2u);
+    if (active) store_sample(out, P, pix, finish(escaped, escaped ? n : P.maxIter, zEsc, der, P));
+    record_stats(stats, active, status, n, P.maxIter, P.statsSlot);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -534,6 +560,7 @@ kernel void bla_init(device FSBLAEntry *E [[buffer(0)]],
                      device float *LR [[buffer(2)]],
                      device const FSRefExt *Zx [[buffer(3)]],
                      constant FSBLABuildParams &p [[buffer(4)]],
+                     device float *MZ [[buffer(5)]],
                      uint i [[thread_position_in_grid]]) {
     if (i >= p.count) return;
     FSRefExt Z = Zx[i + 1];
@@ -575,6 +602,7 @@ kernel void bla_init(device FSBLAEntry *E [[buffer(0)]],
     e.pad0 = 0;
     e.pad1 = 0;
     E[p.dstOffset + i] = e;
+    MZ[p.dstOffset + i] = lz;
     LR[p.dstOffset + i] = logR;
     R2[p.dstOffset + i] = logR >= -62.0f ? exp2(2.0f * logR) : 0.0f;
 }
@@ -589,6 +617,7 @@ kernel void bla_merge(device FSBLAEntry *E [[buffer(0)]],
                       device float *R2 [[buffer(1)]],
                       device float *LR [[buffer(2)]],
                       constant FSBLABuildParams &p [[buffer(4)]],
+                      device float *MZ [[buffer(5)]],
                       uint i [[thread_position_in_grid]]) {
     if (i >= p.count) return;
     uint xi = p.srcOffset + 2 * i, yi = xi + 1;
@@ -626,6 +655,7 @@ kernel void bla_merge(device FSBLAEntry *E [[buffer(0)]],
     e.pad1 = 0;
     uint o = p.dstOffset + i;
     E[o] = e;
+    MZ[o] = min(MZ[xi], MZ[yi]);
     LR[o] = lr;
     R2[o] = lr >= -62.0f ? exp2(2.0f * lr) : 0.0f;
 }
@@ -635,10 +665,8 @@ kernel void bla_merge(device FSBLAEntry *E [[buffer(0)]],
 
 kernel void stats_reset(device uint *stats [[buffer(7)]], constant uint &slot [[buffer(0)]], uint i [[thread_position_in_grid]]) {
     if (i > 0) return;
-    stats[slot * 4 + 0] = 0xFFFFFFFFu;
-    stats[slot * 4 + 1] = 0u;
-    stats[slot * 4 + 2] = 0u;
-    stats[slot * 4 + 3] = 0u;
+    stats[slot * 8 + 0] = 0xFFFFFFFFu;
+    for (uint k = 1; k < 8; k++) stats[slot * 8 + k] = 0u;
 }
 
 // smooth.x = low iteration, smooth.y = span; alpha 1 snaps to the new statistics.
@@ -648,7 +676,7 @@ kernel void stats_smooth(device const uint *stats [[buffer(7)]],
                          uint i [[thread_position_in_grid]]) {
     if (i > 0) return;
     uint slot = uint(args.x);
-    uint lo = stats[slot * 4 + 0], hi = stats[slot * 4 + 1], esc = stats[slot * 4 + 2];
+    uint lo = stats[slot * 8 + 0], hi = stats[slot * 8 + 1], esc = stats[slot * 8 + 2];
     if (esc == 0u) return;
     float4 s = smooth[0];
     float nlo = float(lo), nspan = max(float(hi - lo), 1.0f);
@@ -684,15 +712,18 @@ inline float3 shade(GSample s, constant FSColorParams &C, float4 st, texture2d<f
         col = mix(col, pal.sample(ps, float2(t, rowB)).rgb, C.paletteMix);
     }
     if (C.lightStrength > 0.0f) {
-        float2 g = float2(s.normal);
-        float3 N = normalize(float3(-g * 0.9f, 1.0f));
+        // Height field = smooth iteration count: steep next to the set, flat far away, so the
+        // relief follows the filaments. s.normal is the screen-space direction away from the set.
+        float dpx = exp2(s.de);
+        float slope = 1.6f / (1.0f + 0.35f * dpx);
+        float3 N = normalize(float3(float2(s.normal) * slope, 1.0f));
         float ce = cos(C.lightElevation);
-        float3 L = float3(cos(C.lightAzimuth) * ce, sin(C.lightAzimuth) * ce, sin(C.lightElevation));
-        float diff = max(dot(N, L), 0.0f);
+        float3 L = float3(cos(C.lightAzimuth) * ce, -sin(C.lightAzimuth) * ce, sin(C.lightElevation));
+        const float wrap = 0.3f;
+        float lit = max(dot(N, L) + wrap, 0.0f) / (L.z + wrap);
         float3 H = normalize(L + float3(0.0f, 0.0f, 1.0f));
-        float spec = pow(max(dot(N, H), 0.0f), 40.0f);
-        float lit = 0.35f + 0.65f * diff / max(L.z, 0.2f) * 0.9f;
-        col = mix(col, col * lit + spec * 0.35f, C.lightStrength);
+        float spec = pow(max(dot(N, H), 0.0f), 48.0f) - pow(H.z, 48.0f);
+        col = mix(col, col * lit + max(spec, 0.0f) * 0.3f, C.lightStrength);
     }
     if (C.edgeStrength > 0.0f) {
         float dpx = exp2(s.de);
@@ -702,47 +733,62 @@ inline float3 shade(GSample s, constant FSColorParams &C, float4 st, texture2d<f
     return col;
 }
 
-inline GSample fetch(device const GSample *g, uint2 size, int2 p) {
-    p = clamp(p, int2(0), int2(size) - 1);
-    return g[uint(p.y) * size.x + uint(p.x)];
-}
-
-// Colour of an output pixel from a G-buffer of a (possibly) different size, bilinear on colours.
-inline float3 sample_gbuffer(device const GSample *g, uint2 gsize, uint2 outSize, uint2 o,
-                             constant FSColorParams &C, float4 st, texture2d<float> pal, sampler ps) {
-    if (gsize.x == outSize.x && gsize.y == outSize.y) return shade(g[o.y * gsize.x + o.x], C, st, pal, ps);
-    float2 gp = (float2(o) + 0.5f) * float2(gsize) / float2(outSize) - 0.5f;
+// Bilinear sample of the top-left `size` region of a colour texture at output pixel o.
+inline float3 upsample_color(texture2d<float, access::read> t, uint2 size, uint2 outSize, uint2 o) {
+    float2 gp = (float2(o) + 0.5f) * float2(size) / float2(outSize) - 0.5f;
     int2 i0 = int2(floor(gp));
     float2 f = gp - float2(i0);
-    float3 c00 = shade(fetch(g, gsize, i0), C, st, pal, ps);
-    float3 c10 = shade(fetch(g, gsize, i0 + int2(1, 0)), C, st, pal, ps);
-    float3 c01 = shade(fetch(g, gsize, i0 + int2(0, 1)), C, st, pal, ps);
-    float3 c11 = shade(fetch(g, gsize, i0 + int2(1, 1)), C, st, pal, ps);
+    int2 hi = int2(size) - 1;
+    float3 c00 = t.read(uint2(clamp(i0, int2(0), hi))).rgb;
+    float3 c10 = t.read(uint2(clamp(i0 + int2(1, 0), int2(0), hi))).rgb;
+    float3 c01 = t.read(uint2(clamp(i0 + int2(0, 1), int2(0), hi))).rgb;
+    float3 c11 = t.read(uint2(clamp(i0 + int2(1, 1), int2(0), hi))).rgb;
     return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
 }
 
+// Colours a full-resolution G-buffer into the accumulator. Tiles not yet computed fall back to the
+// (already coloured) preview image.
 kernel void colorize(texture2d<float, access::read_write> acc [[texture(0)]],
                      texture2d<float> pal [[texture(1)]],
+                     texture2d<float, access::read> fallback [[texture(2)]],
                      device const GSample *g [[buffer(0)]],
-                     device const GSample *fb [[buffer(1)]],
                      device const uint *tileDone [[buffer(2)]],
                      constant FSColorParams &C [[buffer(3)]],
                      device const float4 *smooth [[buffer(4)]],
                      uint2 o [[thread_position_in_grid]]) {
     if (o.x >= C.outSize.x || o.y >= C.outSize.y) return;
     constexpr sampler ps(filter::linear, s_address::repeat, t_address::clamp_to_edge);
-    float4 st = smooth[0];
     float3 col;
     bool usePrimary = true;
     if (C.useFallback != 0u) {
-        uint2 gp = uint2((float2(o) + 0.5f) * float2(C.gSize) / float2(C.outSize));
-        uint2 t = min(gp / C.tileSize, C.tileGrid - 1);
+        uint2 t = min(o / C.tileSize, C.tileGrid - 1);
         usePrimary = tileDone[t.y * C.tileGrid.x + t.x] != 0u;
     }
-    if (usePrimary) col = sample_gbuffer(g, C.gSize, C.outSize, o, C, st, pal, ps);
-    else col = sample_gbuffer(fb, C.fbSize, C.outSize, o, C, st, pal, ps);
+    if (usePrimary) col = shade(g[o.y * C.gSize.x + o.x], C, smooth[0], pal, ps);
+    else col = upsample_color(fallback, C.fbSize, C.outSize, o);
     float4 prev = C.accumulate != 0u ? acc.read(o) : float4(0.0f);
     acc.write(prev + float4(col, 1.0f), o);
+}
+
+// Colours a (preview) G-buffer at its own resolution.
+kernel void shade_samples(texture2d<float, access::write> dst [[texture(0)]],
+                          texture2d<float> pal [[texture(1)]],
+                          device const GSample *g [[buffer(0)]],
+                          constant FSColorParams &C [[buffer(3)]],
+                          device const float4 *smooth [[buffer(4)]],
+                          uint2 o [[thread_position_in_grid]]) {
+    if (o.x >= C.gSize.x || o.y >= C.gSize.y) return;
+    constexpr sampler ps(filter::linear, s_address::repeat, t_address::clamp_to_edge);
+    dst.write(float4(shade(g[o.y * C.gSize.x + o.x], C, smooth[0], pal, ps), 1.0f), o);
+}
+
+// Scales a coloured preview up into the accumulator (one sample).
+kernel void upsample(texture2d<float, access::read> src [[texture(0)]],
+                     texture2d<float, access::write> acc [[texture(1)]],
+                     constant FSColorParams &C [[buffer(3)]],
+                     uint2 o [[thread_position_in_grid]]) {
+    if (o.x >= C.outSize.x || o.y >= C.outSize.y) return;
+    acc.write(float4(upsample_color(src, C.gSize, C.outSize, o), 1.0f), o);
 }
 
 inline float srgb_encode(float c) {
@@ -756,13 +802,39 @@ inline float hash12(float2 p) {
     return fract((p3.x + p3.y) * p3.z);
 }
 
+inline float3 acc_texel(texture2d<float, access::read> acc, int2 p, uint2 size, float3 bg) {
+    if (p.x < 0 || p.y < 0 || p.x >= int(size.x) || p.y >= int(size.y)) return bg;
+    float4 a = acc.read(uint2(p));
+    return a.rgb / max(a.w, 1e-6f);
+}
+
 kernel void present(texture2d<float, access::read> acc [[texture(0)]],
                     texture2d<float, access::write> dst [[texture(1)]],
                     constant FSPresentParams &P [[buffer(0)]],
                     uint2 o [[thread_position_in_grid]]) {
     if (o.x >= P.size.x || o.y >= P.size.y) return;
-    float4 a = acc.read(o);
-    float3 c = a.rgb / max(a.w, 1e-6f) * P.exposure;
+    float3 c;
+    if (P.identity != 0u) {
+        float4 a = acc.read(o);
+        c = a.rgb / max(a.w, 1e-6f);
+    } else {
+        float2 q = float2(o) + 0.5f - 0.5f * float2(P.size);
+        float2 q0 = float2(dot(P.A.xy, q), dot(P.A.zw, q)) + P.b;
+        float2 sp = q0 + 0.5f * float2(P.srcSize) - 0.5f;
+        int2 i0 = int2(floor(sp));
+        float2 f = sp - float2(i0);
+        float3 bg = P.background.rgb;
+        float3 c00 = acc_texel(acc, i0, P.srcSize, bg);
+        float3 c10 = acc_texel(acc, i0 + int2(1, 0), P.srcSize, bg);
+        float3 c01 = acc_texel(acc, i0 + int2(0, 1), P.srcSize, bg);
+        float3 c11 = acc_texel(acc, i0 + int2(1, 1), P.srcSize, bg);
+        c = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+    }
+    c *= P.exposure;
+    if (P.vignette > 0.0f) {
+        float2 uv = (float2(o) + 0.5f) / float2(P.size) - 0.5f;
+        c *= 1.0f - P.vignette * dot(uv, uv);
+    }
     float n = hash12(float2(o)) + hash12(float2(o) + 17.13f) - 1.0f;
     float3 s = float3(srgb_encode(c.r), srgb_encode(c.g), srgb_encode(c.b)) + n * P.ditherAmp;
     dst.write(float4(s, 1.0f), o);

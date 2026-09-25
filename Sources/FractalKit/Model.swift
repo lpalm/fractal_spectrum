@@ -26,7 +26,7 @@ public enum FractalFamily: String, CaseIterable, Codable, Sendable, Identifiable
     }
 
     /// The Burning Ship is conventionally drawn with the imaginary axis pointing down.
-    var flipY: Bool { self == .burningShip }
+    public var flipY: Bool { self == .burningShip }
 }
 
 /// Formula selection: family, Multibrot power and Julia mode.
@@ -121,7 +121,7 @@ public struct ColorSettings: Codable, Sendable, Hashable {
     /// 0 linear, 1 square root, 2 logarithmic.
     public var mapping = 2
     public var lightStrength: Double = 0.75
-    public var lightAzimuth: Double = 0.8
+    public var lightAzimuth: Double = 2.3
     public var lightElevation: Double = 0.75
     public var edgeStrength: Double = 0.35
     public var interior = SIMD3<Float>(0.004, 0.004, 0.008)
@@ -130,7 +130,7 @@ public struct ColorSettings: Codable, Sendable, Hashable {
 }
 
 /// Everything needed to compute one image.
-public struct Scene: @unchecked Sendable {
+public struct FractalScene: @unchecked Sendable {
     public var formula: Formula
     public var view: Viewport
     public var iter: IterationSettings

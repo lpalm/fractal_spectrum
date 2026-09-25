@@ -23,7 +23,7 @@ struct Args {
 
 let args = Args()
 
-func makeScene() -> Scene {
+func makeScene() -> FractalScene {
     var formula = Formula()
     formula.family = FractalFamily(rawValue: args.string("formula", "mandelbrot")) ?? .mandelbrot
     formula.power = args.int("power", 2)
@@ -48,7 +48,7 @@ func makeScene() -> Scene {
     iter.blaLog2Eps = args.double("eps", -24)
     iter.derivative = args.values["noder"] == nil
     iter.useBLA = args.values["nobla"] == nil
-    return Scene(formula: formula, view: view, iter: iter)
+    return FractalScene(formula: formula, view: view, iter: iter)
 }
 
 func size() -> (Int, Int) {
@@ -57,6 +57,7 @@ func size() -> (Int, Int) {
 }
 
 let engine = Engine()
+Engine.traceTuning = args.values["trace"] != nil
 
 switch args.command {
 case "render":
@@ -120,15 +121,9 @@ case "bench":
     var scene = makeScene()
     let (w, h) = size()
     engine.calibrate(scene: &scene, width: w, height: h)
-    _ = engine.iterationMap(scene: scene, width: w, height: h)   // warm-up: pipelines, reference, BLA
-    let runs = args.int("runs", 5)
-    var best = Double.infinity
-    for _ in 0..<runs {
-        let t0 = Date()
-        _ = engine.iterationMap(scene: scene, width: w, height: h)
-        best = min(best, Date().timeIntervalSince(t0))
-    }
-    print(String(format: "%dx%d maxIter %d: best %.2f ms", w, h, scene.iter.maxIter, best * 1000))
+    let ms = engine.benchmarkPass(scene: scene, width: w, height: h, runs: args.int("runs", 5),
+                                  warmup: args.double("warmup", 2))
+    print(String(format: "%dx%d maxIter %d: best %.2f ms GPU", w, h, scene.iter.maxIter, ms))
 
 case "dive":
     // Follows the boundary: repeatedly re-centres on a high-iteration escaped sample and zooms in.
@@ -157,6 +152,35 @@ case "dive":
         print(String(format: "zoom 1e%.1f  maxIter %d  iter %d", scene.view.zoomLog10, scene.iter.maxIter, pick.2))
     }
     print("--re \(scene.view.center.re.string(digits: Int(scene.view.zoomLog10) + 12)) --im \(scene.view.center.im.string(digits: Int(scene.view.zoomLog10) + 12)) --zoom \(scene.view.zoomLog10)")
+
+case "stats":
+    // Iteration statistics of one pass at a fixed iteration limit.
+    let scene = makeScene()
+    let (w, h) = (args.int("w", 64), args.int("h", 40))
+    guard let cb = engine.gpu.queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { exit(1) }
+    let slot = engine.nextStatsSlot()
+    let g = engine.makeGBuffer(samples: w * h)
+    guard let plan = engine.makePlan(scene: scene, grid: .init(width: w, height: h), enc: enc, blocking: true, statsSlot: slot) else { exit(1) }
+    engine.encodeStatsReset(enc, slot: slot)
+    engine.encodeIterate(enc, plan: plan, gbuf: g, origin: .zero, size: SIMD2(UInt32(w), UInt32(h)), bufOrigin: .zero, bufStride: UInt32(w))
+    enc.endEncoding()
+    cb.commit()
+    cb.waitUntilCompleted()
+    let s = engine.readStats(slot)
+    print(String(format: "maxIter %d (eff %d): escaped %u late %u unresolved %u interior %u  gpu %.1f ms", scene.iter.maxIter,
+                 plan.effectiveMaxIter, s.escaped, s.lateEscaped, s.unresolved, s.interior, (cb.gpuEndTime - cb.gpuStartTime) * 1000))
+
+case "flighttest":
+    let a = Viewport.home(for: Formula())
+    let b = makeScene().view
+    let f = Flight(from: a, to: b)
+    print(String(format: "path %.1f duration %.1fs", f.pathLength, f.duration))
+    for t in [0.0, 0.001, 0.1, 0.3, 0.5, 0.7, 0.9, 0.999, 1.0] {
+        let v = f.view(at: t)
+        let dEnd = v.center.minus(b.center).log2Abs - v.log2Radius
+        let dStart = v.center.minus(a.center).log2Abs - v.log2Radius
+        print(String(format: "t %.3f  zoom 1e%.2f  log2(|c-end|/r) %.2f  log2(|c-start|/r) %.2f", t, v.zoomLog10, dEnd, dStart))
+    }
 
 default:
     print("usage: fscli render|verify|bench [--formula f] [--re x --im y] [--zoom log10] [--iter n] [--size WxH]")
