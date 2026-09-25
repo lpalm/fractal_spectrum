@@ -5,41 +5,50 @@ import ImageIO
 import UniformTypeIdentifiers
 import CFractal
 
-/// Turns scenes into G-buffers (iteration data) and colours; shared by the interactive view and exports.
+/// Turns scenes into G-buffers (per-sample iteration results) and G-buffers into colours; shared by
+/// the interactive view and exports.
 public final class Engine: @unchecked Sendable {
     public let gpu = GPU.shared
     /// Each engine has its own queue so offline renders never wait behind interactive passes or vice versa.
     public let queue: MTLCommandQueue
     public let palettes: PaletteBank
     public let references = ReferenceStore()
-    let stats: MTLBuffer
-    /// Colour origin: the escape time at the start of the palette (float4: origin, -, -, set).
+    /// Escape statistics of recent passes, one `FSStats` per slot.
+    let statsBuffer: MTLBuffer
+    /// The colour origin: the escape time at the start of the palette (float4: origin, -, -, set).
     let colorOriginBuffer: MTLBuffer
-    private let dummy: MTLBuffer
-    private let dummyTexture: MTLTexture
-    private var slot: UInt32 = 0
+    /// Bound in place of absent inputs.
+    private let placeholderBuffer: MTLBuffer
+    private let placeholderTexture: MTLTexture
+    private var lastStatsSlot: UInt32 = 0
+    /// Passes in flight at once never come near this many.
+    private static let statsSlots: UInt32 = 256
 
     public init() {
         let device = gpu.device
         queue = device.makeCommandQueue()!
         palettes = PaletteBank(device: device)
-        stats = device.makeBuffer(length: 256 * MemoryLayout<FSStats>.stride, options: .storageModeShared)!
+        statsBuffer = device.makeBuffer(length: Int(Engine.statsSlots) * MemoryLayout<FSStats>.stride,
+                                        options: .storageModeShared)!
         assert(MemoryLayout<FSStats>.stride == 32)
         colorOriginBuffer = device.makeBuffer(length: 16, options: .storageModeShared)!
         memset(colorOriginBuffer.contents(), 0, 16)
-        dummy = device.makeBuffer(length: 256, options: .storageModePrivate)!
-        let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: 1, height: 1, mipmapped: false)
-        td.usage = [.shaderRead]
-        dummyTexture = device.makeTexture(descriptor: td)!
+        placeholderBuffer = device.makeBuffer(length: 256, options: .storageModePrivate)!
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: 1, height: 1,
+                                                                  mipmapped: false)
+        descriptor.usage = [.shaderRead]
+        placeholderTexture = device.makeTexture(descriptor: descriptor)!
     }
 
+    /// A statistics slot for the next pass.
     public func nextStatsSlot() -> UInt32 {
-        slot = (slot + 1) % 256
-        return slot
+        lastStatsSlot = (lastStatsSlot + 1) % Engine.statsSlots
+        return lastStatsSlot
     }
 
+    /// Escape statistics of a finished pass.
     public func readStats(_ slot: UInt32) -> FSStats {
-        stats.contents().assumingMemoryBound(to: FSStats.self)[Int(slot)]
+        statsBuffer.contents().assumingMemoryBound(to: FSStats.self)[Int(slot)]
     }
 
     /// Sample grid of one pass: full size in samples plus a sub-sample jitter.
@@ -59,172 +68,176 @@ public final class Engine: @unchecked Sendable {
     public struct Plan {
         var params: FSIterParams
         var pipeline: MTLComputePipelineState
-        var ref: ReferenceOrbit.Snapshot?
-        var bla: BLATable?
-        var critical: ReferenceOrbit.Snapshot?
-        var criticalBLA: BLATable?
+        var reference: ReferenceOrbit.Snapshot?
+        var blaTable: BLATable?
+        /// Julia sets: the orbit of the critical point, which samples rebase onto, and its table.
+        var criticalReference: ReferenceOrbit.Snapshot?
+        var criticalBLATable: BLATable?
         public var perturbed: Bool
         public var deep: Bool
         public var effectiveMaxIter: Int
-        public var usedBLA: Bool { bla != nil }
+        public var usedBLA: Bool { blaTable != nil }
     }
 
-    /// Prepares a pass; returns nil while a needed reference orbit is still being computed.
-    /// Encodes BLA table construction into `enc` when the table must be (re)built.
-    /// When `exclusive` is true no earlier submitted pass can still read this engine's tables, so a
-    /// rebuild may reuse their buffers.
+    /// Prepares a pass; returns nil while a needed reference orbit is still being computed (unless
+    /// `blocking`). Encodes BLA table construction into `encoder` when a table must be (re)built.
+    /// `focus`: where the camera is heading, for placing a new reference orbit.
+    /// `exclusive`: no earlier submitted pass can still read this engine's tables, so a rebuild may
+    /// reuse their buffers.
     /// `interior`: compile in attracting-cycle detection (worth it only when the view contains interior).
-    public func makePlan(scene: FractalScene, grid: Grid, enc: MTLComputeCommandEncoder, blocking: Bool,
+    public func makePlan(scene: FractalScene, grid: Grid, encoder: MTLComputeCommandEncoder, blocking: Bool,
                          focus: Focus? = nil, statsSlot: UInt32, exclusive: Bool = false,
                          interior: Bool = true) -> Plan? {
-        let f = scene.formula
-        let v = scene.view
-        let minSide = Double(min(grid.width, grid.height))
-        let log2Step = v.log2Radius + 1 - log2(minSide)
-        let step = FloatExp.fromLog2(log2Step)
-        let cs = cos(v.rotation), sn = sin(v.rotation)
-        let fy: Double = f.family.flipY ? -1 : 1
-
-        var p = FSIterParams()
-        p.size = SIMD2(UInt32(grid.width), UInt32(grid.height))
-        p.bufStride = UInt32(grid.width)
-        p.stepX = SIMD2(Float(step.m * cs), Float(step.m * sn))
-        p.stepY = SIMD2(Float(step.m * sn * fy), Float(-step.m * cs * fy))
-        p.stepE = Int32(step.e)
-        p.jitter = grid.jitter
-        p.juliaC = SIMD2(Float(f.juliaRe), Float(f.juliaIm))
-        p.bailout2 = Float(scene.iter.bailout * scene.iter.bailout)
-        p.log2Bailout2 = log2(p.bailout2)
-        p.invLog2Power = 1 / log2(Float(f.effectivePower))
-        p.log2Step = Float(log2Step)
-        p.statsSlot = statsSlot
+        let formula = scene.formula, view = scene.view
+        let log2Step = view.log2Step(width: grid.width, height: grid.height)
         let maxIter = max(scene.iter.maxIter, 16)
-        p.maxIter = UInt32(maxIter)
+        var params = iterationParams(scene: scene, grid: grid, log2Step: log2Step, maxIter: maxIter, statsSlot: statsSlot)
+        var key = GPU.PipelineKey(name: "iterate_direct", formula: formula.family.formulaID,
+                                  power: Int32(formula.effectivePower), julia: formula.julia,
+                                  derivative: scene.iter.derivative)
 
-        var key = GPU.PipelineKey(name: "iterate_direct")
-        key.formula = f.family.formulaID
-        key.power = Int32(f.effectivePower)
-        key.julia = f.julia
-        key.withDer = scene.iter.derivative
-
-        let perturb = log2Step < -18
-        if !perturb {
-            p.offsetM = SIMD2(Float(v.center.re.doubleValue), Float(v.center.im.doubleValue))
-            return Plan(params: p, pipeline: gpu.pipeline(key), ref: nil, bla: nil, critical: nil, criticalBLA: nil,
-                        perturbed: false, deep: false, effectiveMaxIter: maxIter)
+        // Floats resolve samples this far apart around the view centre; deeper views iterate each
+        // sample's difference from a reference orbit instead.
+        guard log2Step < -18 else {
+            params.offsetM = SIMD2(Float(view.center.re.doubleValue), Float(view.center.im.doubleValue))
+            return Plan(params: params, pipeline: gpu.pipeline(key), perturbed: false, deep: false,
+                        effectiveMaxIter: maxIter)
         }
-
-        guard let ref = references.reference(formula: f, view: v, minSide: minSide, length: maxIter + 1,
-                                             focus: focus, blocking: blocking) else { return nil }
-        let snap = ref.snapshot
-        guard snap.count >= 2 else { return nil }
-        var criticalRef: ReferenceOrbit?
-        if f.julia {
-            guard let c = references.criticalOrbit(formula: f, precision: v.requiredPrecision(minSide: minSide),
+        let minSide = Double(min(grid.width, grid.height))
+        guard let reference = references.reference(formula: formula, view: view, minSide: minSide,
+                                                   length: maxIter + 1, focus: focus, blocking: blocking) else { return nil }
+        let orbit = reference.snapshot
+        guard orbit.count >= 2 else { return nil }
+        var critical: ReferenceOrbit?
+        if formula.julia {
+            guard let c = references.criticalOrbit(formula: formula, precision: view.requiredPrecision(minSide: minSide),
                                                    length: maxIter + 1, blocking: blocking),
                   c.snapshot.count >= 2 else { return nil }
-            criticalRef = c
+            critical = c
         }
-        let offset = v.center.minus(ref.center)
-        let sh = offset.shared
-        p.offsetM = sh.m
-        p.offsetE = sh.e
-        let effMax = snap.escaped ? maxIter : min(maxIter, snap.count - 1)
-        p.maxIter = UInt32(effMax)
-        p.refLen = UInt32(snap.count)
+        let offset = view.center.minus(reference.center)
+        (params.offsetM, params.offsetE) = offset.shared
+        let effectiveMaxIter = orbit.escaped ? maxIter : min(maxIter, orbit.count - 1)
+        params.maxIter = UInt32(effectiveMaxIter)
+        params.refLen = UInt32(orbit.count)
 
-        // Largest |dc| over the grid decides how far each approximation may reach (no dc for Julia sets).
-        let halfDiag = log2Step + log2(0.5 * hypot(Double(grid.width), Double(grid.height)))
-        let lo = offset.log2Abs
-        let log2C = f.julia ? -1e30
-            : (lo.isFinite ? max(lo, halfDiag) + log2(1 + exp2(-abs(lo - halfDiag))) : halfDiag)
-        let eps = scene.iter.blaLog2Eps
-        func blaTable(for r: ReferenceOrbit, _ s: ReferenceOrbit.Snapshot, formula: Formula) -> BLATable? {
+        // The largest |dc| over the grid, log2(|offset| + half diagonal), decides how far each
+        // approximation may reach; Julia sets have no dc.
+        let log2HalfDiagonal = log2Step + log2(0.5 * hypot(Double(grid.width), Double(grid.height)))
+        let log2Offset = offset.log2Abs
+        let log2C = formula.julia ? -1e30
+            : log2Offset.isFinite ? max(log2Offset, log2HalfDiagonal) + log2(1 + exp2(-abs(log2Offset - log2HalfDiagonal)))
+            : log2HalfDiagonal
+        let log2Eps = scene.iter.blaLog2Eps
+        /// The orbit's table, rebuilt (with twice the reach needed) unless the current one reaches
+        /// far enough without being more than 16 times too cautious.
+        func blaTable(of orbit: ReferenceOrbit, _ snapshot: ReferenceOrbit.Snapshot, formula: Formula) -> BLATable? {
             guard scene.iter.useBLA else { return nil }
-            if let t = r.bla, t.refCount == s.count, t.log2Eps == eps, log2C <= t.log2C, log2C >= t.log2C - 4 { return t }
-            let t = BLATable(encodingInto: enc, snapshot: s, formula: formula, log2C: log2C + 1, log2Eps: eps,
-                             reuse: exclusive ? r.bla : nil)
-            r.bla = t
+            if let t = orbit.bla, t.orbitLength == snapshot.count, t.log2Eps == log2Eps, log2C <= t.log2C,
+               log2C >= t.log2C - 4 { return t }
+            let t = BLATable(encodingInto: encoder, snapshot: snapshot, formula: formula, log2C: log2C + 1,
+                             log2Eps: log2Eps, reuse: exclusive ? orbit.bla : nil)
+            orbit.bla = t
             return t
         }
-        let table = blaTable(for: ref, snap, formula: f)
-        var critSnap: ReferenceOrbit.Snapshot?
-        var critTable: BLATable?
-        if let c = criticalRef {
-            var fc = f
-            fc.julia = false
-            let cs = c.snapshot
-            critSnap = cs
-            critTable = blaTable(for: c, cs, formula: fc)
-            p.refLen2 = UInt32(cs.count)
-            if let t = critTable {
-                p.blaLevels2 = UInt32(t.offsets.count)
-                withUnsafeMutableBytes(of: &p.blaOffset2) { raw in
-                    let b = raw.bindMemory(to: UInt32.self)
-                    for (i, o) in t.offsets.enumerated() { b[i] = o }
-                }
-                withUnsafeMutableBytes(of: &p.blaCount2) { raw in
-                    let b = raw.bindMemory(to: UInt32.self)
-                    for (i, c) in t.counts.enumerated() { b[i] = c }
-                }
+        let table = blaTable(of: reference, orbit, formula: formula)
+        if let table {
+            params.blaLevels = UInt32(table.offsets.count)
+            copy(table.offsets, into: &params.blaOffset)
+            copy(table.counts, into: &params.blaCount)
+        }
+        var criticalOrbit: ReferenceOrbit.Snapshot?
+        var criticalTable: BLATable?
+        if let critical {
+            var parameterPlane = formula
+            parameterPlane.julia = false
+            let snapshot = critical.snapshot
+            criticalOrbit = snapshot
+            criticalTable = blaTable(of: critical, snapshot, formula: parameterPlane)
+            params.refLen2 = UInt32(snapshot.count)
+            if let t = criticalTable {
+                params.blaLevels2 = UInt32(t.offsets.count)
+                copy(t.offsets, into: &params.blaOffset2)
+                copy(t.counts, into: &params.blaCount2)
             }
         }
-        if let t = table {
-            p.blaLevels = UInt32(t.offsets.count)
-            withUnsafeMutableBytes(of: &p.blaOffset) { raw in
-                let b = raw.bindMemory(to: UInt32.self)
-                for (i, o) in t.offsets.enumerated() { b[i] = o }
-            }
-            withUnsafeMutableBytes(of: &p.blaCount) { raw in
-                let b = raw.bindMemory(to: UInt32.self)
-                for (i, c) in t.counts.enumerated() { b[i] = c }
-            }
-        }
+        // Views this deep may need extended-range deltas (the kernel's DEEP variant).
         let deep = log2Step < -50
         key.name = "iterate_perturb"
         key.useBLA = table != nil
         key.deep = deep
         key.interior = interior
-        return Plan(params: p, pipeline: gpu.pipeline(key), ref: snap, bla: table, critical: critSnap,
-                    criticalBLA: critTable, perturbed: true, deep: deep, effectiveMaxIter: effMax)
+        return Plan(params: params, pipeline: gpu.pipeline(key), reference: orbit, blaTable: table,
+                    criticalReference: criticalOrbit, criticalBLATable: criticalTable, perturbed: true, deep: deep,
+                    effectiveMaxIter: effectiveMaxIter)
     }
 
-    /// Iterates the samples of `origin ..< origin + size` into `gbuf` laid out from `bufOrigin` with `bufStride`.
-    public func encodeIterate(_ enc: MTLComputeCommandEncoder, plan: Plan, gbuf: MTLBuffer,
+    /// Kernel parameters of a pass before any reference orbit is involved: where its samples lie in
+    /// the plane and when they escape.
+    private func iterationParams(scene: FractalScene, grid: Grid, log2Step: Double, maxIter: Int,
+                                 statsSlot: UInt32) -> FSIterParams {
+        let formula = scene.formula
+        let step = FloatExp.fromLog2(log2Step)
+        let basis = scene.view.basis(flipY: formula.family.flipY)
+        var params = FSIterParams()
+        params.size = SIMD2(UInt32(grid.width), UInt32(grid.height))
+        params.bufStride = UInt32(grid.width)
+        params.stepX = SIMD2<Float>(basis.x * step.m)
+        params.stepY = SIMD2<Float>(basis.y * step.m)
+        params.stepE = Int32(step.e)
+        params.jitter = grid.jitter
+        params.juliaC = SIMD2(Float(formula.juliaRe), Float(formula.juliaIm))
+        params.bailout2 = Float(scene.iter.bailout * scene.iter.bailout)
+        params.log2Bailout2 = log2(params.bailout2)
+        params.invLog2Power = 1 / log2(Float(formula.effectivePower))
+        params.log2Step = Float(log2Step)
+        params.statsSlot = statsSlot
+        params.maxIter = UInt32(maxIter)
+        return params
+    }
+
+    /// Iterates the samples of `origin ..< origin + size` into `gBuffer`, laid out from `bufferOrigin`
+    /// with rows of `bufferStride` samples.
+    public func encodeIterate(_ encoder: MTLComputeCommandEncoder, plan: Plan, into gBuffer: MTLBuffer,
                               origin: SIMD2<UInt32>, size: SIMD2<UInt32>,
-                              bufOrigin: SIMD2<UInt32>, bufStride: UInt32) {
-        var p = plan.params
-        p.origin = origin
-        p.workSize = size
-        p.bufOrigin = bufOrigin
-        p.bufStride = bufStride
-        enc.setBuffer(gbuf, offset: 0, index: 0)
-        enc.setBytes(&p, length: MemoryLayout<FSIterParams>.stride, index: 1)
-        if let r = plan.ref {
-            enc.setBuffer(r.zf, offset: 0, index: 2)
-            enc.setBuffer(r.zx, offset: 0, index: 3)
-            enc.setBuffer(plan.bla?.entries ?? dummy, offset: 0, index: 4)
-            enc.setBuffer(plan.bla?.r2 ?? dummy, offset: 0, index: 5)
-            enc.setBuffer(plan.bla?.logR ?? dummy, offset: 0, index: 6)
-            enc.setBuffer(plan.bla?.minZ ?? dummy, offset: 0, index: 8)
-            enc.setBuffer(plan.critical?.zf ?? dummy, offset: 0, index: 9)
-            enc.setBuffer(plan.critical?.zx ?? dummy, offset: 0, index: 10)
-            enc.setBuffer(plan.criticalBLA?.entries ?? dummy, offset: 0, index: 11)
-            enc.setBuffer(plan.criticalBLA?.r2 ?? dummy, offset: 0, index: 12)
-            enc.setBuffer(plan.criticalBLA?.logR ?? dummy, offset: 0, index: 13)
-            enc.setBuffer(plan.criticalBLA?.minZ ?? dummy, offset: 0, index: 14)
-            enc.setBuffer(plan.bla?.maxR2 ?? dummy, offset: 0, index: 15)
-            enc.setBuffer(plan.criticalBLA?.maxR2 ?? dummy, offset: 0, index: 16)
+                              bufferOrigin: SIMD2<UInt32>, bufferStride: UInt32) {
+        var params = plan.params
+        params.origin = origin
+        params.workSize = size
+        params.bufOrigin = bufferOrigin
+        params.bufStride = bufferStride
+        encoder.setBuffer(gBuffer, offset: 0, index: 0)
+        encoder.setBytes(&params, length: MemoryLayout<FSIterParams>.stride, index: 1)
+        if let reference = plan.reference {
+            // indices as in the signature of `iterate_perturb`
+            func bind(_ buffer: MTLBuffer?, _ index: Int) {
+                encoder.setBuffer(buffer ?? placeholderBuffer, offset: 0, index: index)
+            }
+            let table = plan.blaTable, critical = plan.criticalReference, criticalTable = plan.criticalBLATable
+            bind(reference.points, 2)
+            bind(reference.extendedPoints, 3)
+            bind(table?.entries, 4)
+            bind(table?.radius2, 5)
+            bind(table?.log2Radius, 6)
+            bind(table?.log2MinZ, 8)
+            bind(critical?.points, 9)
+            bind(critical?.extendedPoints, 10)
+            bind(criticalTable?.entries, 11)
+            bind(criticalTable?.radius2, 12)
+            bind(criticalTable?.log2Radius, 13)
+            bind(criticalTable?.log2MinZ, 14)
+            bind(table?.maxRadius2, 15)
+            bind(criticalTable?.maxRadius2, 16)
         }
-        enc.setBuffer(stats, offset: 0, index: 7)
-        gpu.dispatch2D(enc, plan.pipeline, width: Int(size.x), height: Int(size.y))
+        encoder.setBuffer(statsBuffer, offset: 0, index: 7)
+        gpu.dispatch2D(encoder, plan.pipeline, width: Int(size.x), height: Int(size.y))
     }
 
-    public func encodeStatsReset(_ enc: MTLComputeCommandEncoder, slot: UInt32) {
-        var s = slot
-        enc.setBuffer(stats, offset: 0, index: 7)
-        enc.setBytes(&s, length: 4, index: 0)
-        gpu.dispatch1D(enc, gpu.pipeline("stats_reset"), count: 1)
+    public func encodeStatsReset(_ encoder: MTLComputeCommandEncoder, slot: UInt32) {
+        var slot = slot
+        encoder.setBuffer(statsBuffer, offset: 0, index: 7)
+        encoder.setBytes(&slot, length: 4, index: 0)
+        gpu.dispatch1D(encoder, gpu.pipeline("stats_reset"), count: 1)
     }
 
     /// Octaves of escape time a view keeps above the colour origin (see the `color_origin` kernel).
@@ -234,22 +247,20 @@ public final class Engine: @unchecked Sendable {
 
     /// Moves the colour origin towards what a finished pass's statistics call for, in proportion to
     /// the zoom since the last update (`zoomed`, in doublings); nil snaps to the pass (a new view).
-    public func encodeColorOrigin(_ enc: MTLComputeCommandEncoder, slot: UInt32, zoomed: Double?) {
+    public func encodeColorOrigin(_ encoder: MTLComputeCommandEncoder, slot: UInt32, zoomed: Double?) {
         let rate = zoomed.map { Float(1 - exp(-abs($0) / Engine.colorOriginDoublings)) } ?? 1
         var args = SIMD3<Float>(Float(slot), rate, Engine.colorSpan)
-        enc.setBuffer(stats, offset: 0, index: 7)
-        enc.setBuffer(colorOriginBuffer, offset: 0, index: 0)
-        enc.setBytes(&args, length: MemoryLayout<SIMD3<Float>>.stride, index: 1)
-        gpu.dispatch1D(enc, gpu.pipeline("color_origin"), count: 1)
+        encoder.setBuffer(statsBuffer, offset: 0, index: 7)
+        encoder.setBuffer(colorOriginBuffer, offset: 0, index: 0)
+        encoder.setBytes(&args, length: MemoryLayout<SIMD3<Float>>.stride, index: 1)
+        gpu.dispatch1D(encoder, gpu.pipeline("color_origin"), count: 1)
     }
-
-    public static var traceTuning = false
 
     /// The escape time at the start of the palette; nil until a pass has set it (the next one snaps).
     public var colorOrigin: Float? {
         get {
-            let o = colorOriginBuffer.contents().assumingMemoryBound(to: SIMD4<Float>.self).pointee
-            return o.w == 0 ? nil : o.x
+            let origin = colorOriginBuffer.contents().assumingMemoryBound(to: SIMD4<Float>.self).pointee
+            return origin.w == 0 ? nil : origin.x
         }
         set {
             colorOriginBuffer.contents().assumingMemoryBound(to: SIMD4<Float>.self).pointee =
@@ -257,8 +268,8 @@ public final class Engine: @unchecked Sendable {
         }
     }
 
-    /// Source G-buffer for colouring.
-    public struct GSource {
+    /// The top-left `size` samples of a G-buffer.
+    public struct GBufferRegion {
         public var buffer: MTLBuffer
         public var size: SIMD2<UInt32>
 
@@ -272,19 +283,23 @@ public final class Engine: @unchecked Sendable {
     public struct TileFallback {
         public var preview: MTLTexture
         public var previewSize: SIMD2<UInt32>
-        public var done: MTLBuffer
+        /// One flag per tile, non-zero once the tile is computed.
+        public var tileDone: MTLBuffer
+        /// Tiles per axis.
         public var grid: SIMD2<UInt32>
         public var tileSize: UInt32
 
-        public init(preview: MTLTexture, previewSize: SIMD2<UInt32>, done: MTLBuffer, grid: SIMD2<UInt32>, tileSize: UInt32) {
+        public init(preview: MTLTexture, previewSize: SIMD2<UInt32>, tileDone: MTLBuffer, grid: SIMD2<UInt32>,
+                    tileSize: UInt32) {
             self.preview = preview
             self.previewSize = previewSize
-            self.done = done
+            self.tileDone = tileDone
             self.grid = grid
             self.tileSize = tileSize
         }
     }
 
+    /// A cross-fade from one palette to another.
     public struct PaletteBlend: Sendable, Equatable {
         public var from: Int
         public var to: Int
@@ -297,90 +312,88 @@ public final class Engine: @unchecked Sendable {
         }
     }
 
-    private func colorParams(_ color: ColorSettings, blend: PaletteBlend?, gSize: SIMD2<UInt32>,
-                             outSize: SIMD2<UInt32>) -> FSColorParams {
-        var c = FSColorParams()
-        c.outSize = outSize
-        c.gSize = gSize
-        c.density = Float(color.density)
-        c.offset = Float(color.offset)
-        c.mapping = Int32(color.mapping)
-        c.deScale = Float(log2(Double(max(1, min(gSize.x, gSize.y))) / 2))
-        c.lightAzimuth = Float(color.lightAzimuth)
-        c.lightElevation = Float(color.lightElevation)
-        c.lightStrength = Float(color.lightStrength)
-        c.edgeStrength = Float(color.edgeStrength)
-        c.paletteCount = Float(palettes.count)
-        if let b = blend {
-            c.paletteRow = Float(b.from)
-            c.paletteRowB = Float(b.to)
-            c.paletteMix = b.mix
-        } else {
-            c.paletteRow = Float(color.palette)
-            c.paletteRowB = Float(color.palette)
-            c.paletteMix = 0
+    private func colorParams(_ color: ColorSettings, blend: PaletteBlend?, gBufferSize: SIMD2<UInt32>,
+                             outputSize: SIMD2<UInt32>) -> FSColorParams {
+        var params = FSColorParams()
+        params.outSize = outputSize
+        params.gSize = gBufferSize
+        params.density = Float(color.density)
+        params.offset = Float(color.offset)
+        params.mapping = Int32(color.mapping)
+        params.deScale = Float(log2(Double(max(1, min(gBufferSize.x, gBufferSize.y))) / 2))
+        params.lightAzimuth = Float(color.lightAzimuth)
+        params.lightElevation = Float(color.lightElevation)
+        params.lightStrength = Float(color.lightStrength)
+        params.edgeStrength = Float(color.edgeStrength)
+        params.paletteCount = Float(palettes.count)
+        params.paletteRow = Float(blend?.from ?? color.palette)
+        params.paletteRowB = Float(blend?.to ?? color.palette)
+        params.paletteMix = blend?.mix ?? 0
+        params.interior = SIMD4(color.interior, 1)
+        params.tileGrid = SIMD2(1, 1)
+        params.tileSize = 1
+        return params
+    }
+
+    /// Colours a full-resolution G-buffer (`size`, by default the accumulator's) into the accumulator,
+    /// replacing its contents or adding a sample.
+    public func encodeColorize(_ encoder: MTLComputeCommandEncoder, into accumulator: MTLTexture,
+                               from primary: GBufferRegion, fallback: TileFallback?, color: ColorSettings,
+                               blend: PaletteBlend? = nil, accumulate: Bool, size: SIMD2<UInt32>? = nil) {
+        let size = size ?? SIMD2(UInt32(accumulator.width), UInt32(accumulator.height))
+        var params = colorParams(color, blend: blend, gBufferSize: primary.size, outputSize: size)
+        params.accumulate = accumulate ? 1 : 0
+        if let fallback {
+            params.useFallback = 1
+            params.fbSize = fallback.previewSize
+            params.tileGrid = fallback.grid
+            params.tileSize = fallback.tileSize
         }
-        c.interior = SIMD4(color.interior, 1)
-        c.tileGrid = SIMD2(1, 1)
-        c.tileSize = 1
-        return c
+        encoder.setTexture(accumulator, index: 0)
+        encoder.setTexture(palettes.texture, index: 1)
+        encoder.setTexture(fallback?.preview ?? placeholderTexture, index: 2)
+        encoder.setBuffer(primary.buffer, offset: 0, index: 0)
+        encoder.setBuffer(fallback?.tileDone ?? placeholderBuffer, offset: 0, index: 2)
+        encoder.setBytes(&params, length: MemoryLayout<FSColorParams>.stride, index: 3)
+        encoder.setBuffer(colorOriginBuffer, offset: 0, index: 4)
+        gpu.dispatch2D(encoder, gpu.pipeline("colorize"), width: Int(size.x), height: Int(size.y))
     }
 
-    /// Colours a full-resolution G-buffer (same size as `outSize`) into the accumulator.
-    public func encodeColorize(_ enc: MTLComputeCommandEncoder, acc: MTLTexture, primary: GSource,
-                               fallback: TileFallback?, color: ColorSettings, blend: PaletteBlend? = nil,
-                               accumulate: Bool, outSize: SIMD2<UInt32>? = nil) {
-        let out = outSize ?? SIMD2(UInt32(acc.width), UInt32(acc.height))
-        var c = colorParams(color, blend: blend, gSize: primary.size, outSize: out)
-        c.accumulate = accumulate ? 1 : 0
-        if let fb = fallback {
-            c.useFallback = 1
-            c.fbSize = fb.previewSize
-            c.tileGrid = fb.grid
-            c.tileSize = fb.tileSize
-        }
-        enc.setTexture(acc, index: 0)
-        enc.setTexture(palettes.texture, index: 1)
-        enc.setTexture(fallback?.preview ?? dummyTexture, index: 2)
-        enc.setBuffer(primary.buffer, offset: 0, index: 0)
-        enc.setBuffer(fallback?.done ?? dummy, offset: 0, index: 2)
-        enc.setBytes(&c, length: MemoryLayout<FSColorParams>.stride, index: 3)
-        enc.setBuffer(colorOriginBuffer, offset: 0, index: 4)
-        gpu.dispatch2D(enc, gpu.pipeline("colorize"), width: Int(out.x), height: Int(out.y))
+    /// Colours a G-buffer at its own resolution into `image`.
+    public func encodeShade(_ encoder: MTLComputeCommandEncoder, from source: GBufferRegion, into image: MTLTexture,
+                            color: ColorSettings, blend: PaletteBlend? = nil) {
+        var params = colorParams(color, blend: blend, gBufferSize: source.size, outputSize: source.size)
+        encoder.setTexture(image, index: 0)
+        encoder.setTexture(palettes.texture, index: 1)
+        encoder.setBuffer(source.buffer, offset: 0, index: 0)
+        encoder.setBytes(&params, length: MemoryLayout<FSColorParams>.stride, index: 3)
+        encoder.setBuffer(colorOriginBuffer, offset: 0, index: 4)
+        gpu.dispatch2D(encoder, gpu.pipeline("shade_samples"), width: Int(source.size.x), height: Int(source.size.y))
     }
 
-    /// Colours a G-buffer at its own resolution into `dst`.
-    public func encodeShade(_ enc: MTLComputeCommandEncoder, source: GSource, dst: MTLTexture, color: ColorSettings,
-                            blend: PaletteBlend? = nil) {
-        var c = colorParams(color, blend: blend, gSize: source.size, outSize: source.size)
-        enc.setTexture(dst, index: 0)
-        enc.setTexture(palettes.texture, index: 1)
-        enc.setBuffer(source.buffer, offset: 0, index: 0)
-        enc.setBytes(&c, length: MemoryLayout<FSColorParams>.stride, index: 3)
-        enc.setBuffer(colorOriginBuffer, offset: 0, index: 4)
-        gpu.dispatch2D(enc, gpu.pipeline("shade_samples"), width: Int(source.size.x), height: Int(source.size.y))
+    /// Bilinearly scales the top-left `size` region of `image` into the accumulator (as one sample).
+    public func encodeUpsample(_ encoder: MTLComputeCommandEncoder, from image: MTLTexture, size: SIMD2<UInt32>,
+                               into accumulator: MTLTexture, outputSize: SIMD2<UInt32>) {
+        var params = FSColorParams()
+        params.gSize = size
+        params.outSize = outputSize
+        encoder.setTexture(image, index: 0)
+        encoder.setTexture(accumulator, index: 1)
+        encoder.setBytes(&params, length: MemoryLayout<FSColorParams>.stride, index: 3)
+        gpu.dispatch2D(encoder, gpu.pipeline("upsample"), width: Int(outputSize.x), height: Int(outputSize.y))
     }
 
-    /// Bilinearly scales the top-left `size` region of `src` into the accumulator (as one sample).
-    public func encodeUpsample(_ enc: MTLComputeCommandEncoder, src: MTLTexture, size: SIMD2<UInt32>, acc: MTLTexture,
-                               outSize: SIMD2<UInt32>) {
-        var c = FSColorParams()
-        c.gSize = size
-        c.outSize = outSize
-        enc.setTexture(src, index: 0)
-        enc.setTexture(acc, index: 1)
-        enc.setBytes(&c, length: MemoryLayout<FSColorParams>.stride, index: 3)
-        gpu.dispatch2D(enc, gpu.pipeline("upsample"), width: Int(outSize.x), height: Int(outSize.y))
-    }
-
+    /// A colour image of the given size, for coloured previews.
     public func makeColorTexture(width: Int, height: Int) -> MTLTexture {
-        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: width, height: height, mipmapped: false)
-        d.usage = [.shaderRead, .shaderWrite]
-        d.storageMode = .private
-        return gpu.device.makeTexture(descriptor: d)!
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: width,
+                                                                  height: height, mipmapped: false)
+        descriptor.usage = [.shaderRead, .shaderWrite]
+        descriptor.storageMode = .private
+        return gpu.device.makeTexture(descriptor: descriptor)!
     }
 
-    /// Maps output pixels into the accumulator: identity, or an affine reprojection between two views.
+    /// Maps output pixels into the accumulator: identity, or an affine reprojection between two views
+    /// (centred output pixel q samples the accumulator at A q + b, centred; A is row-major).
     public struct Reprojection: Sendable {
         public var A: SIMD4<Float>
         public var b: SIMD2<Float>
@@ -395,38 +408,39 @@ public final class Engine: @unchecked Sendable {
         }
     }
 
-    public func encodePresent(_ enc: MTLComputeCommandEncoder, acc: MTLTexture, dst: MTLTexture,
-                              reprojection: Reprojection = .identity, srcSize: SIMD2<UInt32>? = nil,
-                              dither: Float = 1.0 / 255.0, exposure: Float = 1, vignette: Float = 0,
-                              background: SIMD3<Float> = SIMD3(0.004, 0.004, 0.008), size: SIMD2<UInt32>? = nil,
-                              hdrHeadroom: Float? = nil) {
-        var p = FSPresentParams()
-        p.hdr = hdrHeadroom == nil ? 0 : 1
-        p.headroom = hdrHeadroom ?? 1
-        p.size = size ?? SIMD2(UInt32(dst.width), UInt32(dst.height))
-        p.srcSize = srcSize ?? SIMD2(UInt32(acc.width), UInt32(acc.height))
-        p.identity = reprojection.identity && p.srcSize == p.size ? 1 : 0
-        p.A = reprojection.A
-        p.b = reprojection.b
-        p.ditherAmp = dither
-        p.exposure = exposure
-        p.vignette = vignette
-        p.background = SIMD4(background, 1)
-        enc.setTexture(acc, index: 0)
-        enc.setTexture(dst, index: 1)
-        enc.setBytes(&p, length: MemoryLayout<FSPresentParams>.stride, index: 0)
-        gpu.dispatch2D(enc, gpu.pipeline("present"), width: Int(p.size.x), height: Int(p.size.y))
+    /// Resolves the accumulator (the average of its samples) into a displayable image: sRGB with
+    /// dither, or extended-range linear Display P3 with the display's `hdrHeadroom`. `background`
+    /// (linear) fills what the reprojection brings in from outside the accumulator's `sourceSize`.
+    public func encodePresent(_ encoder: MTLComputeCommandEncoder, from accumulator: MTLTexture, into target: MTLTexture,
+                              reprojection: Reprojection = .identity, sourceSize: SIMD2<UInt32>? = nil,
+                              background: SIMD3<Float>, size: SIMD2<UInt32>? = nil, hdrHeadroom: Float? = nil) {
+        var params = FSPresentParams()
+        params.hdr = hdrHeadroom == nil ? 0 : 1
+        params.headroom = hdrHeadroom ?? 1
+        params.size = size ?? SIMD2(UInt32(target.width), UInt32(target.height))
+        params.srcSize = sourceSize ?? SIMD2(UInt32(accumulator.width), UInt32(accumulator.height))
+        params.identity = reprojection.identity && params.srcSize == params.size ? 1 : 0
+        params.A = reprojection.A
+        params.b = reprojection.b
+        params.background = SIMD4(background, 1)
+        encoder.setTexture(accumulator, index: 0)
+        encoder.setTexture(target, index: 1)
+        encoder.setBytes(&params, length: MemoryLayout<FSPresentParams>.stride, index: 0)
+        gpu.dispatch2D(encoder, gpu.pipeline("present"), width: Int(params.size.x), height: Int(params.size.y))
     }
 
+    /// A G-buffer for `samples` samples (16 bytes each, GPU only).
     public func makeGBuffer(samples: Int) -> MTLBuffer {
         gpu.device.makeBuffer(length: max(samples, 1) * 16, options: .storageModePrivate)!
     }
 
+    /// An image that sums colour samples (alpha counts them).
     public func makeAccumulator(width: Int, height: Int) -> MTLTexture {
-        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float, width: width, height: height, mipmapped: false)
-        d.usage = [.shaderRead, .shaderWrite]
-        d.storageMode = .private
-        return gpu.device.makeTexture(descriptor: d)!
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float, width: width,
+                                                                  height: height, mipmapped: false)
+        descriptor.usage = [.shaderRead, .shaderWrite]
+        descriptor.storageMode = .private
+        return gpu.device.makeTexture(descriptor: descriptor)!
     }
 
     /// Low-discrepancy sub-pixel offsets (R2 sequence, tent-filtered); sample 0 is the pixel centre.
@@ -440,117 +454,133 @@ public final class Engine: @unchecked Sendable {
     }
 }
 
+/// Copies `values` to the start of a fixed-size C array, which Swift imports as a tuple.
+private func copy<CArray>(_ values: [UInt32], into array: inout CArray) {
+    withUnsafeMutableBytes(of: &array) { raw in
+        let slots = raw.bindMemory(to: UInt32.self)
+        for (i, value) in values.enumerated() { slots[i] = value }
+    }
+}
+
 // MARK: - Still images
 
 extension Engine {
+    /// Size and quality of a still image.
     public struct StillOptions: Sendable {
         public var width: Int
         public var height: Int
+        /// Anti-aliasing samples per pixel.
         public var samples: Int
-        public var tile = 2048
         /// Colour origin to use (e.g. the live view's, so the image keeps its colours); set from the
         /// image when nil.
         public var colorOrigin: Float?
 
-        public init(width: Int, height: Int, samples: Int, tile: Int = 2048, colorOrigin: Float? = nil) {
+        public init(width: Int, height: Int, samples: Int, colorOrigin: Float? = nil) {
             self.width = width
             self.height = height
             self.samples = samples
-            self.tile = tile
             self.colorOrigin = colorOrigin
         }
     }
 
-    /// Runs a low-resolution pass to set colour statistics and, if enabled, the iteration limit.
+    /// Still images render in square tiles of at most this many pixels per side, bounding memory.
+    static let stillTileSize = 2048
+
+    /// Prints each step of `calibrate`'s iteration tuning.
+    public static var traceTuning = false
+
+    /// Runs low-resolution passes to set the colour origin (unless `updateColors` is false) and, with
+    /// automatic iterations, the iteration limit.
     public func calibrate(scene: inout FractalScene, width: Int, height: Int, updateColors: Bool = true) {
         let scale = max(1, max(width, height) / 512)
         let gw = max(width / scale, 16), gh = max(height / scale, 16)
-        let g = makeGBuffer(samples: gw * gh)
+        let gBuffer = makeGBuffer(samples: gw * gh)
         for _ in 0..<24 {
-            guard let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return }
+            guard let commandBuffer = queue.makeCommandBuffer(),
+                  let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
             let slot = nextStatsSlot()
-            guard let plan = makePlan(scene: scene, grid: Grid(width: gw, height: gh), enc: enc, blocking: true,
+            guard let plan = makePlan(scene: scene, grid: Grid(width: gw, height: gh), encoder: encoder, blocking: true,
                                       statsSlot: slot) else {
-                enc.endEncoding()
-                cb.commit()
+                encoder.endEncoding()
+                commandBuffer.commit()
                 return
             }
-            encodeStatsReset(enc, slot: slot)
-            encodeIterate(enc, plan: plan, gbuf: g, origin: .zero, size: SIMD2(UInt32(gw), UInt32(gh)),
-                          bufOrigin: .zero, bufStride: UInt32(gw))
-            if updateColors { encodeColorOrigin(enc, slot: slot, zoomed: nil) }
-            enc.endEncoding()
-            cb.commit()
-            cb.waitUntilCompleted()
+            encodeStatsReset(encoder, slot: slot)
+            encodeIterate(encoder, plan: plan, into: gBuffer, origin: .zero, size: SIMD2(UInt32(gw), UInt32(gh)),
+                          bufferOrigin: .zero, bufferStride: UInt32(gw))
+            if updateColors { encodeColorOrigin(encoder, slot: slot, zoomed: nil) }
+            encoder.endEncoding()
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
             guard scene.iter.autoIterations else { return }
-            let s = readStats(slot)
-            let samples = gw * gh
-            var next = IterationTuner.adjust(maxIter: scene.iter.maxIter, stats: s, samples: samples)
-            let ms = (cb.gpuEndTime - cb.gpuStartTime) * 1000
-            if next > scene.iter.maxIter, IterationTuner.grownCost(ms, stats: s, samples: samples, maxIter: scene.iter.maxIter,
-                                                                    next: next) * 1000 / Double(samples) > IterationTuner.offlineMicrosPerSample {
-                next = scene.iter.maxIter
-            }
+            let stats = readStats(slot)
+            let gpuMs = (commandBuffer.gpuEndTime - commandBuffer.gpuStartTime) * 1000
+            let maxIter = scene.iter.maxIter
+            let next = IterationTuner.adjustOffline(maxIter: maxIter, stats: stats, samples: gw * gh, gpuMs: gpuMs)
             if Engine.traceTuning {
-                print("tune maxIter \(scene.iter.maxIter): esc \(s.escaped) late \(s.lateEscaped) unresolved \(s.unresolved) interior \(s.interior) hi \(s.maxIter) of \(samples) \(String(format: "%.1f", ms)) ms -> \(next)")
+                print("tune maxIter \(maxIter): esc \(stats.escaped) late \(stats.lateEscaped) unresolved \(stats.unresolved) interior \(stats.interior) hi \(stats.maxIter) of \(gw * gh) \(String(format: "%.1f", gpuMs)) ms -> \(next)")
             }
-            if next == scene.iter.maxIter { return }
-            let lowered = next < scene.iter.maxIter
             scene.iter.maxIter = next
-            if lowered { return }
+            // a lower limit still shows every escape, so only a raised one needs another look
+            if next <= maxIter { return }
         }
     }
 
-    /// Renders a still image tile by tile with `samples` anti-aliasing samples per pixel.
-    public func renderStill(scene inScene: FractalScene, color: ColorSettings, options o: StillOptions,
+    /// Renders a still image tile by tile with `options.samples` anti-aliasing samples per pixel.
+    /// `progress` returns false to cancel.
+    public func renderStill(scene: FractalScene, color: ColorSettings, options: StillOptions,
                             progress: ((Double) -> Bool)? = nil) -> CGImage? {
-        var scene = inScene
-        colorOrigin = o.colorOrigin
-        calibrate(scene: &scene, width: o.width, height: o.height, updateColors: o.colorOrigin == nil)
-        let tile = min(o.tile, max(o.width, o.height))
-        let g = makeGBuffer(samples: tile * tile)
-        let acc = makeAccumulator(width: tile, height: tile)
-        let outDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: tile, height: tile, mipmapped: false)
-        outDesc.usage = [.shaderWrite, .shaderRead]
-        outDesc.storageMode = .shared
-        let out = gpu.device.makeTexture(descriptor: outDesc)!
-        var pixels = [UInt8](repeating: 0, count: o.width * o.height * 4)
-        let tilesX = (o.width + tile - 1) / tile, tilesY = (o.height + tile - 1) / tile
-        let total = Double(tilesX * tilesY * o.samples)
-        var done = 0.0
+        var scene = scene
+        let (width, height) = (options.width, options.height)
+        colorOrigin = options.colorOrigin
+        calibrate(scene: &scene, width: width, height: height, updateColors: options.colorOrigin == nil)
+        let tile = min(Engine.stillTileSize, max(width, height))
+        let gBuffer = makeGBuffer(samples: tile * tile)
+        let accumulator = makeAccumulator(width: tile, height: tile)
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: tile, height: tile,
+                                                                  mipmapped: false)
+        descriptor.usage = [.shaderWrite, .shaderRead]
+        descriptor.storageMode = .shared
+        let tileImage = gpu.device.makeTexture(descriptor: descriptor)!
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let tilesX = (width + tile - 1) / tile, tilesY = (height + tile - 1) / tile
+        let passes = Double(tilesX * tilesY * options.samples)
+        var finishedPasses = 0.0
         let paced = PacedEncoder(queue: queue)
         for ty in 0..<tilesY {
             for tx in 0..<tilesX {
                 let x0 = tx * tile, y0 = ty * tile
-                let w = min(tile, o.width - x0), h = min(tile, o.height - y0)
+                let w = min(tile, width - x0), h = min(tile, height - y0)
                 let size = SIMD2(UInt32(w), UInt32(h))
-                for s in 0..<o.samples {
+                for sample in 0..<options.samples {
                     let slot = nextStatsSlot()
-                    guard let plan = makePlan(scene: scene, grid: Grid(width: o.width, height: o.height, jitter: Engine.jitter(s)),
-                                              enc: paced.enc, blocking: true, statsSlot: slot) else { return nil }
-                    paced.iterate(self, plan: plan, gbuf: g, origin: SIMD2(x0, y0), size: SIMD2(w, h),
-                                  bufOrigin: SIMD2(UInt32(x0), UInt32(y0)), bufStride: UInt32(w))
-                    encodeColorize(paced.enc, acc: acc, primary: GSource(buffer: g, size: size),
-                                   fallback: nil, color: color, accumulate: s > 0, outSize: size)
-                    if s == o.samples - 1 {
-                        encodePresent(paced.enc, acc: acc, dst: out, srcSize: size, size: size)
+                    let grid = Grid(width: width, height: height, jitter: Engine.jitter(sample))
+                    guard let plan = makePlan(scene: scene, grid: grid, encoder: paced.encoder, blocking: true,
+                                              statsSlot: slot) else { return nil }
+                    paced.iterate(self, plan: plan, into: gBuffer, origin: SIMD2(x0, y0), size: SIMD2(w, h),
+                                  bufferOrigin: SIMD2(UInt32(x0), UInt32(y0)), bufferStride: UInt32(w))
+                    encodeColorize(paced.encoder, into: accumulator, from: GBufferRegion(buffer: gBuffer, size: size),
+                                   fallback: nil, color: color, accumulate: sample > 0, size: size)
+                    if sample == options.samples - 1 {
+                        encodePresent(paced.encoder, from: accumulator, into: tileImage, sourceSize: size,
+                                      background: color.interior, size: size)
                     }
-                    done += 1
-                    if let progress, !progress(done / total) { return nil }
+                    finishedPasses += 1
+                    if let progress, !progress(finishedPasses / passes) { return nil }
                 }
                 paced.sync()
                 pixels.withUnsafeMutableBytes { raw in
-                    let base = raw.baseAddress!.advanced(by: (y0 * o.width + x0) * 4)
-                    out.getBytes(base, bytesPerRow: o.width * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+                    let tileStart = raw.baseAddress!.advanced(by: (y0 * width + x0) * 4)
+                    tileImage.getBytes(tileStart, bytesPerRow: width * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
                 }
             }
         }
-        return Engine.makeImage(pixels: pixels, width: o.width, height: o.height)
+        return Engine.makeImage(pixels: pixels, width: width, height: height)
     }
 
+    /// An sRGB image of RGBX pixels.
     static func makeImage(pixels: [UInt8], width: Int, height: Int) -> CGImage? {
-        let data = Data(pixels) as CFData
-        guard let provider = CGDataProvider(data: data) else { return nil }
+        guard let provider = CGDataProvider(data: Data(pixels) as CFData) else { return nil }
         return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
                        space: CGColorSpace(name: CGColorSpace.sRGB)!,
                        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
@@ -558,11 +588,10 @@ extension Engine {
     }
 
     public static func writePNG(_ image: CGImage, to url: URL) throws {
-        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
-            throw CocoaError(.fileWriteUnknown)
-        }
-        CGImageDestinationAddImage(dest, image, nil)
-        if !CGImageDestinationFinalize(dest) { throw CocoaError(.fileWriteUnknown) }
+        guard let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil)
+        else { throw CocoaError(.fileWriteUnknown) }
+        CGImageDestinationAddImage(destination, image, nil)
+        if !CGImageDestinationFinalize(destination) { throw CocoaError(.fileWriteUnknown) }
     }
 }
 
@@ -594,5 +623,15 @@ public enum IterationTuner {
         let hi = Int(s.maxIter)
         if hi < maxIter / 8 && unresolved < 0.0005 && maxIter > floor { return max(floor, hi * 3) }
         return maxIter
+    }
+
+    /// `adjust` for offline renders: a raise must keep the average sample within
+    /// `offlineMicrosPerSample`. `stats` describe one pass of `samples` samples; `gpuMs` may cover
+    /// `passes` such passes (anti-aliasing samples).
+    public static func adjustOffline(maxIter: Int, stats: FSStats, samples: Int, gpuMs: Double, passes: Int = 1) -> Int {
+        let next = adjust(maxIter: maxIter, stats: stats, samples: samples)
+        guard next > maxIter else { return next }
+        let grown = grownCost(gpuMs, stats: stats, samples: samples, maxIter: maxIter, next: next)
+        return grown * 1000 / Double(samples * max(passes, 1)) <= offlineMicrosPerSample ? next : maxIter
     }
 }

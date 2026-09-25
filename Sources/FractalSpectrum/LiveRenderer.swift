@@ -307,13 +307,13 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         let sz = SIMD2(UInt32(size.x), UInt32(size.y))
         if let drawable {
             let hdr = drawable.texture.pixelFormat == .rgba16Float ? hdrHeadroom : nil
-            engine.encodePresent(enc, acc: display[front], dst: drawable.texture, reprojection: rep, srcSize: sz,
+            engine.encodePresent(enc, from: display[front], into: drawable.texture, reprojection: rep, sourceSize: sz,
                                  background: color.interior, size: sz, hdrHeadroom: hdr)
         }
         let rec = recorder
         let frame = rec?.nextFrame()
         if let rec, let frame, let tex = CVMetalTextureGetTexture(frame.texture) {
-            engine.encodePresent(enc, acc: display[front], dst: tex, reprojection: rep, srcSize: sz,
+            engine.encodePresent(enc, from: display[front], into: tex, reprojection: rep, sourceSize: sz,
                                  background: color.interior, size: SIMD2(UInt32(rec.width), UInt32(rec.height)))
         }
         enc.endEncoding()
@@ -348,8 +348,8 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         guard let tex = gpu.device.makeTexture(descriptor: d),
               let cb = presentQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return nil }
         let rep = camera.view.reprojection(from: fv, width: size.x, height: size.y, flipY: camera.flipY)
-        engine.encodePresent(enc, acc: display[front], dst: tex, reprojection: rep,
-                             srcSize: SIMD2(UInt32(size.x), UInt32(size.y)), background: color.interior)
+        engine.encodePresent(enc, from: display[front], into: tex, reprojection: rep,
+                             sourceSize: SIMD2(UInt32(size.x), UInt32(size.y)), background: color.interior)
         enc.endEncoding()
         cb.commit()
         cb.waitUntilCompleted()
@@ -405,7 +405,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         let pw = max(8, Int(Double(size.x) * previewScale)), ph = max(8, Int(Double(size.y) * previewScale))
 
         let slot = engine.nextStatsSlot()
-        guard let plan = engine.makePlan(scene: scene(v), grid: Engine.Grid(width: pw, height: ph), enc: iter,
+        guard let plan = engine.makePlan(scene: scene(v), grid: Engine.Grid(width: pw, height: ph), encoder: iter,
                                          blocking: false, focus: camera.focus(width: size.x, height: size.y),
                                          statsSlot: slot, exclusive: true, interior: interiorLikely),
               let gPreview, let gFull, let accum, let previewColor else {
@@ -419,7 +419,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         let target = full1 ? gFull : gPreview
         let gs = SIMD2(UInt32(pw), UInt32(ph))
         engine.encodeStatsReset(iter, slot: slot)
-        engine.encodeIterate(iter, plan: plan, gbuf: target, origin: .zero, size: gs, bufOrigin: .zero, bufStride: UInt32(pw))
+        engine.encodeIterate(iter, plan: plan, into: target, origin: .zero, size: gs, bufferOrigin: .zero, bufferStride: UInt32(pw))
         // Colours move with the zoom only, so they hold at rest and while panning; jumps snap them.
         // A flight's arrival settles them faster, so a place is reached with the colours it snaps to.
         let arriving = (camera.flightProgress ?? 0) > 0.8
@@ -429,11 +429,11 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         snapColors = false
         let outSize = SIMD2(UInt32(size.x), UInt32(size.y))
         if full1 {
-            engine.encodeColorize(enc, acc: accum, primary: .init(buffer: gFull, size: outSize), fallback: nil,
-                                  color: color, blend: paletteBlend, accumulate: false, outSize: outSize)
+            engine.encodeColorize(enc, into: accum, from: .init(buffer: gFull, size: outSize), fallback: nil,
+                                  color: color, blend: paletteBlend, accumulate: false, size: outSize)
         } else {
-            engine.encodeShade(enc, source: .init(buffer: gPreview, size: gs), dst: previewColor, color: color, blend: paletteBlend)
-            engine.encodeUpsample(enc, src: previewColor, size: gs, acc: accum, outSize: outSize)
+            engine.encodeShade(enc, from: .init(buffer: gPreview, size: gs), into: previewColor, color: color, blend: paletteBlend)
+            engine.encodeUpsample(enc, from: previewColor, size: gs, into: accum, outputSize: outSize)
         }
         accSamples = 1
         previewSize = SIMD2(pw, ph)
@@ -459,7 +459,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         let jitter = stage == .aa ? Engine.jitter(aaIndex) : .zero
         let slot = engine.nextStatsSlot()
         guard let plan = engine.makePlan(scene: scene(v), grid: Engine.Grid(width: size.x, height: size.y, jitter: jitter),
-                                         enc: iter, blocking: false, statsSlot: slot, exclusive: true,
+                                         encoder: iter, blocking: false, statsSlot: slot, exclusive: true,
                                          interior: interiorLikely) else { return 0 }
         let target = stage == .aa ? gAA : gFull
         // Tiles write disjoint regions, so they run concurrently and share the slow-pixel tail.
@@ -473,8 +473,8 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         while count > 0 && nextTile < tiles.count {
             let t = tiles[nextTile]
             let w = min(tileSize, size.x - t.x), h = min(tileSize, size.y - t.y)
-            engine.encodeIterate(conc, plan: plan, gbuf: target, origin: SIMD2(UInt32(t.x), UInt32(t.y)),
-                                 size: SIMD2(UInt32(w), UInt32(h)), bufOrigin: .zero, bufStride: UInt32(size.x))
+            engine.encodeIterate(conc, plan: plan, into: target, origin: SIMD2(UInt32(t.x), UInt32(t.y)),
+                                 size: SIMD2(UInt32(w), UInt32(h)), bufferOrigin: .zero, bufferStride: UInt32(size.x))
             if stage == .full { done[tileIndex(t)] = 1 }
             samples += w * h
             nextTile += 1
@@ -484,10 +484,10 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         if stage == .full {
             let complete = nextTile >= tiles.count
             let fb = Engine.TileFallback(preview: previewColor, previewSize: SIMD2(UInt32(previewSize.x), UInt32(previewSize.y)),
-                                         done: tileDone!, grid: tileGrid, tileSize: UInt32(tileSize))
-            engine.encodeColorize(enc, acc: accum, primary: .init(buffer: gFull, size: outSize),
+                                         tileDone: tileDone!, grid: tileGrid, tileSize: UInt32(tileSize))
+            engine.encodeColorize(enc, into: accum, from: .init(buffer: gFull, size: outSize),
                                   fallback: complete ? nil : fb, color: color, blend: paletteBlend,
-                                  accumulate: false, outSize: outSize)
+                                  accumulate: false, size: outSize)
             accSamples = 1
             if complete {
                 stage = aaSamples > 1 ? .aa : .done
@@ -495,8 +495,8 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
                 nextTile = 0
             }
         } else if nextTile >= tiles.count {
-            engine.encodeColorize(enc, acc: accum, primary: .init(buffer: gAA, size: outSize), fallback: nil,
-                                  color: color, blend: paletteBlend, accumulate: true, outSize: outSize)
+            engine.encodeColorize(enc, into: accum, from: .init(buffer: gAA, size: outSize), fallback: nil,
+                                  color: color, blend: paletteBlend, accumulate: true, size: outSize)
             accSamples += 1
             aaIndex += 1
             nextTile = 0
@@ -511,8 +511,8 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         let outSize = SIMD2(UInt32(size.x), UInt32(size.y))
         let fullDone = stage == .aa || stage == .done
         if fullDone, let gFull {
-            engine.encodeColorize(enc, acc: accum, primary: .init(buffer: gFull, size: outSize), fallback: nil,
-                                  color: color, blend: paletteBlend, accumulate: false, outSize: outSize)
+            engine.encodeColorize(enc, into: accum, from: .init(buffer: gFull, size: outSize), fallback: nil,
+                                  color: color, blend: paletteBlend, accumulate: false, size: outSize)
             accSamples = 1
             if aaSamples > 1 {
                 stage = .aa
@@ -521,8 +521,8 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
             }
         } else if let gPreview, let previewColor, previewSize.x > 0 {
             let gs = SIMD2(UInt32(previewSize.x), UInt32(previewSize.y))
-            engine.encodeShade(enc, source: .init(buffer: gPreview, size: gs), dst: previewColor, color: color, blend: paletteBlend)
-            engine.encodeUpsample(enc, src: previewColor, size: gs, acc: accum, outSize: outSize)
+            engine.encodeShade(enc, from: .init(buffer: gPreview, size: gs), into: previewColor, color: color, blend: paletteBlend)
+            engine.encodeUpsample(enc, from: previewColor, size: gs, into: accum, outputSize: outSize)
         }
         renderedColor = colorVersion
     }

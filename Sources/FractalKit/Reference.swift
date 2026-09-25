@@ -13,16 +13,19 @@ public final class ReferenceOrbit: @unchecked Sendable {
     public let precision: Int
 
     private let lock = NSLock()
-    private var zfBuffer: MTLBuffer
-    private var zxBuffer: MTLBuffer
+    /// The orbit's points as floats (zero below the float range) and in extended range.
+    private var pointsBuffer: MTLBuffer
+    private var extendedPointsBuffer: MTLBuffer
     private var capacity: Int
-    private let job: OpaquePointer
-    private var computedCount = 0
-    private var didEscape = false
+    /// The C computation that extends the orbit.
+    private let computation: OpaquePointer
+    private var count = 0
+    private var escaped = false
     private var computing = false
     private let cancelFlag = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
-    private let progressPtr = UnsafeMutablePointer<Int>.allocate(capacity: 1)
-    private(set) var requested = 0
+    private let progressCounter = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+    /// Length the current or last extension aims for.
+    private(set) var requestedLength = 0
 
     /// Table matching the current point count; touched only by the thread that encodes GPU work.
     var bla: BLATable?
@@ -34,96 +37,92 @@ public final class ReferenceOrbit: @unchecked Sendable {
         self.center = center.withPrecision(precision)
         self.precision = precision
         self.capacity = max(capacity, 1024)
-        let device = GPU.shared.device
-        zfBuffer = device.makeBuffer(length: self.capacity * MemoryLayout<SIMD2<Float>>.stride, options: .storageModeShared)!
-        zxBuffer = device.makeBuffer(length: self.capacity * MemoryLayout<FSRefExt>.stride, options: .storageModeShared)!
+        (pointsBuffer, extendedPointsBuffer) = ReferenceOrbit.makeBuffers(capacity: self.capacity)
         if let j = julia {
             let jre = HPFloat(j.x, precision: precision), jim = HPFloat(j.y, precision: precision)
-            job = fs_ref_new(family.formulaID, Int32(power), 1, nil, nil, self.center.re.ptr, self.center.im.ptr,
-                             jre.ptr, jim.ptr, precision)
+            computation = fs_ref_new(family.formulaID, Int32(power), 1, nil, nil, self.center.re.ptr, self.center.im.ptr,
+                                     jre.ptr, jim.ptr, precision)
         } else {
-            job = fs_ref_new(family.formulaID, Int32(power), 0, self.center.re.ptr, self.center.im.ptr,
-                             nil, nil, nil, nil, precision)
+            computation = fs_ref_new(family.formulaID, Int32(power), 0, self.center.re.ptr, self.center.im.ptr,
+                                     nil, nil, nil, nil, precision)
         }
         cancelFlag.pointee = 0
-        progressPtr.pointee = 0
+        progressCounter.pointee = 0
     }
 
     deinit {
-        fs_ref_free(job)
+        fs_ref_free(computation)
         cancelFlag.deallocate()
-        progressPtr.deallocate()
+        progressCounter.deallocate()
     }
 
+    private static func makeBuffers(capacity: Int) -> (points: MTLBuffer, extendedPoints: MTLBuffer) {
+        let device = GPU.shared.device
+        return (device.makeBuffer(length: capacity * MemoryLayout<SIMD2<Float>>.stride, options: .storageModeShared)!,
+                device.makeBuffer(length: capacity * MemoryLayout<FSRefExt>.stride, options: .storageModeShared)!)
+    }
+
+    /// The published part of the orbit.
     struct Snapshot {
-        var zf: MTLBuffer
-        var zx: MTLBuffer
+        var points: MTLBuffer
+        var extendedPoints: MTLBuffer
         var count: Int
         var escaped: Bool
     }
 
     var snapshot: Snapshot {
-        lock.lock()
-        defer { lock.unlock() }
-        return Snapshot(zf: zfBuffer, zx: zxBuffer, count: computedCount, escaped: didEscape)
+        lock.withLock { Snapshot(points: pointsBuffer, extendedPoints: extendedPointsBuffer, count: count, escaped: escaped) }
     }
 
-    var isComputing: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return computing
-    }
+    var isComputing: Bool { lock.withLock { computing } }
 
     /// Points computed so far, including those not yet published.
-    var progressCount: Int { progressPtr.pointee }
+    var progressCount: Int { progressCounter.pointee }
 
-    func covers(_ length: Int) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return didEscape || computedCount >= length
-    }
+    /// Whether the published orbit is complete up to `length` points (or escaped before).
+    func covers(_ length: Int) -> Bool { lock.withLock { escaped || count >= length } }
 
     func cancel() { cancelFlag.pointee = 1 }
 
     /// Computes points until `length` exist or the orbit escapes. Blocks; call off the main thread.
     func extend(to length: Int) {
         lock.lock()
-        if didEscape || computedCount >= length || computing {
+        if escaped || count >= length || computing {
             lock.unlock()
             return
         }
         computing = true
-        requested = length
+        requestedLength = length
         if length > capacity {
-            let newCap = max(length, capacity * 2)
-            let device = GPU.shared.device
-            let nf = device.makeBuffer(length: newCap * MemoryLayout<SIMD2<Float>>.stride, options: .storageModeShared)!
-            let nx = device.makeBuffer(length: newCap * MemoryLayout<FSRefExt>.stride, options: .storageModeShared)!
-            memcpy(nf.contents(), zfBuffer.contents(), computedCount * MemoryLayout<SIMD2<Float>>.stride)
-            memcpy(nx.contents(), zxBuffer.contents(), computedCount * MemoryLayout<FSRefExt>.stride)
-            zfBuffer = nf
-            zxBuffer = nx
-            capacity = newCap
+            let grown = max(length, capacity * 2)
+            let (points, extendedPoints) = ReferenceOrbit.makeBuffers(capacity: grown)
+            memcpy(points.contents(), pointsBuffer.contents(), count * MemoryLayout<SIMD2<Float>>.stride)
+            memcpy(extendedPoints.contents(), extendedPointsBuffer.contents(), count * MemoryLayout<FSRefExt>.stride)
+            pointsBuffer = points
+            extendedPointsBuffer = extendedPoints
+            capacity = grown
         }
-        let zf = zfBuffer.contents().assumingMemoryBound(to: simd_float2.self)
-        let zx = zxBuffer.contents().assumingMemoryBound(to: FSRefExt.self)
+        let points = pointsBuffer.contents().assumingMemoryBound(to: simd_float2.self)
+        let extendedPoints = extendedPointsBuffer.contents().assumingMemoryBound(to: FSRefExt.self)
         lock.unlock()
 
-        let n = fs_ref_run(job, length, zf, zx, 256.0 * 256.0, cancelFlag, progressPtr)
+        let computed = fs_ref_run(computation, length, points, extendedPoints, 256.0 * 256.0, cancelFlag, progressCounter)
 
-        lock.lock()
-        computedCount = n
-        didEscape = fs_ref_escaped(job) != 0
-        computing = false
-        lock.unlock()
+        lock.withLock {
+            count = computed
+            escaped = fs_ref_escaped(computation) != 0
+            computing = false
+        }
     }
 }
 
 /// Picks, computes and caches reference orbits for perturbation rendering.
 public final class ReferenceStore: @unchecked Sendable {
     private let lock = NSLock()
+    /// The orbit in use, the one being prepared to replace it, and (for Julia sets) the critical orbit.
     private var current: ReferenceOrbit?
     private var pending: ReferenceOrbit?
+    private var critical: ReferenceOrbit?
     private let queue = DispatchQueue(label: "fractal.reference", qos: .userInitiated)
 
     /// Called on the main queue whenever a background computation finishes.
@@ -138,44 +137,44 @@ public final class ReferenceStore: @unchecked Sendable {
     }
 
     public var status: Status {
-        lock.lock()
-        defer { lock.unlock() }
-        for r in [pending, current].compactMap({ $0 }) where r.isComputing {
-            let p = r.progressCount
-            return Status(computing: true, progress: r.requested > 0 ? Double(p) / Double(r.requested) : 0, points: p)
+        lock.withLock {
+            for orbit in [pending, current].compactMap({ $0 }) where orbit.isComputing {
+                let points = orbit.progressCount
+                let progress = orbit.requestedLength > 0 ? Double(points) / Double(orbit.requestedLength) : 0
+                return Status(computing: true, progress: progress, points: points)
+            }
+            return Status(computing: false, progress: 1, points: current?.snapshot.count ?? 0)
         }
-        return Status(computing: false, progress: 1, points: current?.snapshot.count ?? 0)
     }
 
-    private func suits(_ r: ReferenceOrbit, _ formula: Formula, _ view: Viewport, need: Int, slack: Double) -> Bool {
-        guard r.family == formula.family, r.power == formula.effectivePower, r.precision >= need,
-              r.julia == (formula.julia ? SIMD2(formula.juliaRe, formula.juliaIm) : nil) else { return false }
-        return view.center.minus(r.center).log2Abs <= view.log2Radius + slack
+    /// Whether `orbit` can serve `view`: same formula, enough precision, and a start within `slack`
+    /// doublings of the view radius from the view centre.
+    private func suits(_ orbit: ReferenceOrbit, _ formula: Formula, _ view: Viewport, precision: Int, slack: Double) -> Bool {
+        guard orbit.family == formula.family, orbit.power == formula.effectivePower, orbit.precision >= precision,
+              orbit.julia == (formula.julia ? SIMD2(formula.juliaRe, formula.juliaIm) : nil) else { return false }
+        return view.center.minus(orbit.center).log2Abs <= view.log2Radius + slack
     }
 
-    private var critical: ReferenceOrbit?
-
-    /// Orbit of the critical point 0 for a Julia set's parameter: the target Julia pixels rebase onto.
+    /// Orbit of the critical point 0 for a Julia set's parameter: the target Julia samples rebase onto.
     /// Returns nil while it is being computed (unless `blocking`).
-    func criticalOrbit(formula: Formula, precision need: Int, length: Int, blocking: Bool) -> ReferenceOrbit? {
-        var f = formula
-        f.julia = false
+    func criticalOrbit(formula: Formula, precision: Int, length: Int, blocking: Bool) -> ReferenceOrbit? {
+        var parameterPlane = formula
+        parameterPlane.julia = false
         let c = SIMD2(formula.juliaRe, formula.juliaIm)
-        lock.lock()
-        var r = critical
-        if let cur = r, cur.family != f.family || cur.power != f.effectivePower || cur.precision < need
-            || cur.center.re.doubleValue != c.x || cur.center.im.doubleValue != c.y {
-            cur.cancel()
-            r = nil
+        let orbit: ReferenceOrbit = lock.withLock {
+            if let existing = critical, existing.family == parameterPlane.family,
+               existing.power == parameterPlane.effectivePower, existing.precision >= precision,
+               existing.center.re.doubleValue == c.x, existing.center.im.doubleValue == c.y {
+                return existing
+            }
+            critical?.cancel()
+            let bits = precision + 64
+            let orbit = ReferenceOrbit(formula: parameterPlane,
+                                       center: PlanePoint(re: HPFloat(c.x, precision: bits), im: HPFloat(c.y, precision: bits)),
+                                       precision: bits, capacity: length + 1)
+            critical = orbit
+            return orbit
         }
-        if r == nil {
-            let prec = need + 64
-            r = ReferenceOrbit(formula: f, center: PlanePoint(re: HPFloat(c.x, precision: prec), im: HPFloat(c.y, precision: prec)),
-                               precision: prec, capacity: length + 1)
-            critical = r
-        }
-        lock.unlock()
-        guard let orbit = r else { return nil }
         if !orbit.covers(length) && !orbit.isComputing {
             if blocking {
                 orbit.extend(to: length)
@@ -194,151 +193,156 @@ public final class ReferenceStore: @unchecked Sendable {
     /// With `blocking`, waits until an ideal reference is complete.
     func reference(formula: Formula, view: Viewport, minSide: Double, length: Int, focus: Focus? = nil,
                    blocking: Bool) -> ReferenceOrbit? {
-        let need = view.requiredPrecision(minSide: minSide)
+        let precision = view.requiredPrecision(minSide: minSide)
         // A new orbit anchored at the focus gets the precision of the destination, so it serves the whole motion.
         var focusView = view
         if let f = focus { focusView.log2Radius = min(f.log2Radius, view.log2Radius) }
-        let newPrecision = max(need, focusView.requiredPrecision(minSide: minSide)) + 64
-        lock.lock()
-        if let p = pending, !p.isComputing, p.covers(length) || p.snapshot.escaped {
-            if suits(p, formula, view, need: need, slack: 10) {
-                current = p
-                pending = nil
-            }
+        let newPrecision = max(precision, focusView.requiredPrecision(minSide: minSide)) + 64
+        func suits(_ orbit: ReferenceOrbit, slack: Double) -> Bool {
+            self.suits(orbit, formula, view, precision: precision, slack: slack)
         }
-        var chosen: ReferenceOrbit?
-        var start: ReferenceOrbit?
-        if let cur = current, suits(cur, formula, view, need: need, slack: 3) {
-            chosen = cur
-            if !cur.covers(length) && !cur.isComputing { start = cur }
+
+        lock.lock()
+        if let p = pending, !p.isComputing, p.covers(length) || p.snapshot.escaped, suits(p, slack: 10) {
+            current = p
+            pending = nil
+        }
+        var usable: ReferenceOrbit?
+        var toExtend: ReferenceOrbit?
+        if let current, suits(current, slack: 3) {
+            usable = current
+            if !current.covers(length) && !current.isComputing { toExtend = current }
         } else {
-            if let p = pending, suits(p, formula, view, need: need, slack: 3) {
-                if !p.covers(length) && !p.isComputing { start = p }
+            if let pending, suits(pending, slack: 3) {
+                if !pending.covers(length) && !pending.isComputing { toExtend = pending }
             } else {
                 pending?.cancel()
-                let anchor = focus?.point ?? view.center
-                let ref = ReferenceOrbit(formula: formula, center: anchor, precision: newPrecision, capacity: length + 1)
-                pending = ref
-                start = ref
+                let orbit = ReferenceOrbit(formula: formula, center: focus?.point ?? view.center, precision: newPrecision,
+                                           capacity: length + 1)
+                pending = orbit
+                toExtend = orbit
             }
-            if let cur = current, suits(cur, formula, view, need: need, slack: 10) { chosen = cur }
+            // meanwhile the current orbit serves if it is not too far off
+            if let current, suits(current, slack: 10) { usable = current }
         }
         lock.unlock()
 
-        if let s = start {
+        if let toExtend {
             if blocking {
-                s.extend(to: length)
+                toExtend.extend(to: length)
             } else {
                 queue.async { [weak self] in
-                    s.extend(to: length)
+                    toExtend.extend(to: length)
                     DispatchQueue.main.async { self?.onUpdate?() }
                 }
             }
         }
-        if blocking {
-            lock.lock()
-            if let p = pending, p === start || (p.covers(length) && suits(p, formula, view, need: need, slack: 10)) {
+        guard blocking else { return usable }
+        return lock.withLock {
+            if let p = pending, p === toExtend || (p.covers(length) && suits(p, slack: 10)) {
                 current = p
                 pending = nil
             }
-            let r = current
-            lock.unlock()
-            if let r, suits(r, formula, view, need: need, slack: 10) { return r }
-            return nil
+            return current.flatMap { suits($0, slack: 10) ? $0 : nil }
         }
-        return chosen
     }
 
     /// Drops all references (e.g. when memory matters or the formula changed).
     public func reset() {
-        lock.lock()
-        pending?.cancel()
-        pending = nil
-        current = nil
-        critical?.cancel()
-        critical = nil
-        lock.unlock()
+        lock.withLock {
+            pending?.cancel()
+            pending = nil
+            current = nil
+            critical?.cancel()
+            critical = nil
+        }
     }
 }
 
-/// Bilinear-approximation table for one reference orbit, built on the GPU.
+/// Bilinear-approximation table for one reference orbit, built on the GPU: level k holds the maps
+/// that skip 2^k iterations from every 2^k-th orbit point, each valid while |delta| stays below its
+/// radius.
 final class BLATable {
     let entries: MTLBuffer
-    let r2: MTLBuffer
-    let logR: MTLBuffer
-    /// log2 of the smallest |Z| each approximation steps over.
-    let minZ: MTLBuffer
+    /// Validity radius of each entry, squared (float) and as log2 (for extended-range deltas).
+    let radius2: MTLBuffer
+    let log2Radius: MTLBuffer
+    /// log2 of the smallest |Z| each entry steps over (for interior detection).
+    let log2MinZ: MTLBuffer
     /// Largest level-0 radius squared (float bits), for skipping hopeless lookups.
-    let maxR2: MTLBuffer
+    let maxRadius2: MTLBuffer
+    /// First entry and entry count of each level.
     let offsets: [UInt32]
     let counts: [UInt32]
+    /// log2 of the largest |dc| the table is valid for, and of its relative error tolerance.
     let log2C: Double
     let log2Eps: Double
-    let refCount: Int
+    /// Orbit points the table was built from.
+    let orbitLength: Int
 
     /// Builds the table on the GPU. `reuse` donates its buffers when large enough; callers pass it only
     /// when no submitted work can still be reading that table.
-    init?(encodingInto enc: MTLComputeCommandEncoder, snapshot s: ReferenceOrbit.Snapshot, formula: Formula,
+    init?(encodingInto encoder: MTLComputeCommandEncoder, snapshot: ReferenceOrbit.Snapshot, formula: Formula,
           log2C: Double, log2Eps: Double, reuse old: BLATable? = nil) {
-        let count0 = s.count - 2
-        guard count0 >= 1 else { return nil }
+        let levelZeroCount = snapshot.count - 2
+        guard levelZeroCount >= 1 else { return nil }
         var offsets: [UInt32] = []
         var counts: [UInt32] = []
         var total = 0
-        var c = count0
-        while c >= 1 && offsets.count < Int(FS_MAX_BLA_LEVELS) {
+        var levelCount = levelZeroCount
+        while levelCount >= 1 && offsets.count < Int(FS_MAX_BLA_LEVELS) {
             offsets.append(UInt32(total))
-            counts.append(UInt32(c))
-            total += c
-            if c < 2 { break }
-            c /= 2
+            counts.append(UInt32(levelCount))
+            total += levelCount
+            if levelCount < 2 { break }
+            levelCount /= 2
         }
         self.offsets = offsets
         self.counts = counts
         self.log2C = log2C
         self.log2Eps = log2Eps
-        refCount = s.count
+        orbitLength = snapshot.count
         let device = GPU.shared.device
         if let old, old.entries.length >= total * MemoryLayout<FSBLAEntry>.stride {
             entries = old.entries
-            r2 = old.r2
-            logR = old.logR
-            minZ = old.minZ
-            maxR2 = old.maxR2
+            radius2 = old.radius2
+            log2Radius = old.log2Radius
+            log2MinZ = old.log2MinZ
+            maxRadius2 = old.maxRadius2
         } else {
-            maxR2 = device.makeBuffer(length: 16, options: .storageModePrivate)!
-            let cap = total + total / 2
-            entries = device.makeBuffer(length: cap * MemoryLayout<FSBLAEntry>.stride, options: .storageModePrivate)!
-            r2 = device.makeBuffer(length: cap * 4, options: .storageModePrivate)!
-            logR = device.makeBuffer(length: cap * 4, options: .storageModePrivate)!
-            minZ = device.makeBuffer(length: cap * 4, options: .storageModePrivate)!
+            // room to grow with the orbit before the next reallocation
+            let capacity = total + total / 2
+            maxRadius2 = device.makeBuffer(length: 16, options: .storageModePrivate)!
+            entries = device.makeBuffer(length: capacity * MemoryLayout<FSBLAEntry>.stride, options: .storageModePrivate)!
+            radius2 = device.makeBuffer(length: capacity * 4, options: .storageModePrivate)!
+            log2Radius = device.makeBuffer(length: capacity * 4, options: .storageModePrivate)!
+            log2MinZ = device.makeBuffer(length: capacity * 4, options: .storageModePrivate)!
         }
 
         let gpu = GPU.shared
-        var key = GPU.PipelineKey(name: "bla_init")
-        key.formula = formula.family.formulaID
-        key.power = Int32(formula.effectivePower)
-        let initPSO = gpu.pipeline(key)
+        var key = GPU.PipelineKey(name: "bla_init", formula: formula.family.formulaID, power: Int32(formula.effectivePower))
+        let initPipeline = gpu.pipeline(key)
         key.name = "bla_merge"
-        let mergePSO = gpu.pipeline(key)
-        enc.setBuffer(entries, offset: 0, index: 0)
-        enc.setBuffer(r2, offset: 0, index: 1)
-        enc.setBuffer(logR, offset: 0, index: 2)
-        enc.setBuffer(s.zx, offset: 0, index: 3)
-        enc.setBuffer(minZ, offset: 0, index: 5)
-        enc.setBuffer(maxR2, offset: 0, index: 6)
-        gpu.dispatch1D(enc, gpu.pipeline("bla_reset_max"), count: 1)
-        var p = FSBLABuildParams(count: UInt32(count0), srcOffset: 0, dstOffset: 0, srcCount: 0,
-                                 log2Eps: Float(log2Eps), log2C: Float(max(log2C, -1e30)), pad0: 0, pad1: 0)
-        enc.setBytes(&p, length: MemoryLayout<FSBLABuildParams>.stride, index: 4)
-        gpu.dispatch1D(enc, initPSO, count: count0)
-        for k in 1..<offsets.count {
-            p.count = counts[k]
-            p.srcOffset = offsets[k - 1]
-            p.srcCount = counts[k - 1]
-            p.dstOffset = offsets[k]
-            enc.setBytes(&p, length: MemoryLayout<FSBLABuildParams>.stride, index: 4)
-            gpu.dispatch1D(enc, mergePSO, count: Int(counts[k]))
+        let mergePipeline = gpu.pipeline(key)
+        encoder.setBuffer(entries, offset: 0, index: 0)
+        encoder.setBuffer(radius2, offset: 0, index: 1)
+        encoder.setBuffer(log2Radius, offset: 0, index: 2)
+        encoder.setBuffer(snapshot.extendedPoints, offset: 0, index: 3)
+        encoder.setBuffer(log2MinZ, offset: 0, index: 5)
+        encoder.setBuffer(maxRadius2, offset: 0, index: 6)
+        gpu.dispatch1D(encoder, gpu.pipeline("bla_reset_max"), count: 1)
+        var params = FSBLABuildParams(count: UInt32(levelZeroCount), srcOffset: 0, dstOffset: 0, srcCount: 0,
+                                      log2Eps: Float(log2Eps), log2C: Float(max(log2C, -1e30)), pad0: 0, pad1: 0)
+        encoder.setBytes(&params, length: MemoryLayout<FSBLABuildParams>.stride, index: 4)
+        gpu.dispatch1D(encoder, initPipeline, count: levelZeroCount)
+        // each level merges pairs of the level below
+        for level in 1..<offsets.count {
+            params.count = counts[level]
+            params.srcOffset = offsets[level - 1]
+            params.srcCount = counts[level - 1]
+            params.dstOffset = offsets[level]
+            encoder.setBytes(&params, length: MemoryLayout<FSBLABuildParams>.stride, index: 4)
+            gpu.dispatch1D(encoder, mergePipeline, count: Int(counts[level]))
         }
     }
 }
@@ -348,17 +352,18 @@ extension Formula {
     /// Julia set), in double precision, ending early once |z| exceeds 4 (for display).
     public func orbit(of point: PlanePoint, count: Int) -> [SIMD2<Float>] {
         let p = point.withPrecision(53)
-        let job: OpaquePointer
+        let computation: OpaquePointer
         if julia {
             let jre = HPFloat(juliaRe, precision: 53), jim = HPFloat(juliaIm, precision: 53)
-            job = fs_ref_new(family.formulaID, Int32(effectivePower), 1, nil, nil, p.re.ptr, p.im.ptr, jre.ptr, jim.ptr, 53)
+            computation = fs_ref_new(family.formulaID, Int32(effectivePower), 1, nil, nil, p.re.ptr, p.im.ptr,
+                                     jre.ptr, jim.ptr, 53)
         } else {
-            job = fs_ref_new(family.formulaID, Int32(effectivePower), 0, p.re.ptr, p.im.ptr, nil, nil, nil, nil, 53)
+            computation = fs_ref_new(family.formulaID, Int32(effectivePower), 0, p.re.ptr, p.im.ptr, nil, nil, nil, nil, 53)
         }
-        defer { fs_ref_free(job) }
-        var zf = [SIMD2<Float>](repeating: .zero, count: count)
-        var zx = [FSRefExt](repeating: FSRefExt(), count: count)
-        let n = fs_ref_run(job, count, &zf, &zx, 16, nil, nil)
-        return Array(zf.prefix(n))
+        defer { fs_ref_free(computation) }
+        var points = [SIMD2<Float>](repeating: .zero, count: count)
+        var extendedPoints = [FSRefExt](repeating: FSRefExt(), count: count)
+        let computed = fs_ref_run(computation, count, &points, &extendedPoints, 16, nil, nil)
+        return Array(points.prefix(computed))
     }
 }

@@ -76,47 +76,55 @@ extension Viewport {
     }
 }
 
-/// Smooth zoom-and-pan path between two views (van Wijk & Nuij), evaluated in log space so that
-/// flights between views many orders of magnitude apart stay exact.
+/// Smooth zoom-and-pan path between two views (van Wijk & Nuij, "Smooth and efficient zooming and
+/// panning"), evaluated in log space so that flights between views many orders of magnitude apart
+/// stay exact. View widths w are measured in units of the distance between the two centres.
 public struct Flight: @unchecked Sendable {
     public let start: Viewport
     public let end: Viewport
     public let duration: Double
-    private let d: ComplexExp
-    private let rho = 1.42
-    private let lnL: Double      // ln |end - start|
-    private let lw0: Double, lw1: Double
-    private let r0: Double, r1: Double
+    /// Length of the path, zooming and panning alike (the paper's S).
     public let pathLength: Double
+    /// end.center - start.center.
+    private let displacement: ComplexExp
+    /// Trade-off between zooming out and panning (the paper's rho).
+    private let rho = 1.42
+    /// ln |displacement|.
+    private let lnDistance: Double
+    /// ln of the start and end widths.
+    private let lnW0: Double, lnW1: Double
+    private let r0: Double, r1: Double
+    /// Centres too close to matter: the flight only zooms.
     private let pureZoom: Bool
 
     public init(from a: Viewport, to b: Viewport, duration: Double? = nil) {
         start = a
         end = b
-        d = b.center.minus(a.center)
+        displacement = b.center.minus(a.center)
         let ln2 = log(2.0)
-        let lu = d.log2Abs * ln2
+        let lu = displacement.log2Abs * ln2
         let la = a.log2Radius * ln2, lb = b.log2Radius * ln2
         pureZoom = !lu.isFinite || lu < min(la, lb) - 8
-        lnL = lu.isFinite ? lu : 0
-        lw0 = la - lnL
-        lw1 = lb - lnL
+        lnDistance = lu.isFinite ? lu : 0
+        lnW0 = la - lnDistance
+        lnW1 = lb - lnDistance
         let rho2 = rho * rho, rho4 = rho2 * rho2
         if pureZoom {
             r0 = 0
             r1 = 0
             pathLength = abs(lb - la) / rho
         } else {
-            // b_i = (w1^2 - w0^2 +- rho^4) / (2 rho^2 w_i), with w in units of |d|
+            // r_i = -asinh(b_i), b_i = (w1^2 - w0^2 +- rho^4) / (2 rho^2 w_i); the widths' exponentials
+            // overflow for large zooms, so large arguments go through logarithms.
             func asinhOf(_ num: Double, lnDen: Double) -> Double {
                 let lnb = log(abs(num)) - lnDen
                 if lnb > 30 { return (num < 0 ? -1 : 1) * (lnb + log(2.0)) }
                 return asinh(num * exp(-lnDen))
             }
-            let e0 = lw0 < 300 ? exp(2 * lw0) : .infinity, e1 = lw1 < 300 ? exp(2 * lw1) : .infinity
+            let e0 = lnW0 < 300 ? exp(2 * lnW0) : .infinity, e1 = lnW1 < 300 ? exp(2 * lnW1) : .infinity
             let n0 = e1 - e0 + rho4, n1 = e1 - e0 - rho4
-            r0 = -asinhOf(n0, lnDen: log(2 * rho2) + lw0)
-            r1 = -asinhOf(n1, lnDen: log(2 * rho2) + lw1)
+            r0 = -asinhOf(n0, lnDen: log(2 * rho2) + lnW0)
+            r1 = -asinhOf(n1, lnDen: log(2 * rho2) + lnW1)
             pathLength = (r1 - r0) / rho
         }
         self.duration = duration ?? min(14, max(1.2, 0.55 * pathLength))
@@ -128,36 +136,38 @@ public struct Flight: @unchecked Sendable {
         return x + log1p(-exp(-2 * x)) - log(2.0)
     }
 
-    /// View at normalised time t in [0, 1] (eased).
+    /// View at normalised time t in [0, 1], eased in and out.
     public func view(at t: Double) -> Viewport {
-        let tt = min(max(t, 0), 1)
-        let e = tt * tt * tt * (tt * (tt * 6 - 15) + 10)
+        let e = smootherstep(min(max(t, 0), 1))
         let s = e * pathLength
         var v = end
         v.rotation = start.rotation + (end.rotation - start.rotation) * e
-        let ln2 = log(2.0)
+        let precision = max(start.center.precision, end.center.precision)
         if pureZoom {
             v.log2Radius = start.log2Radius + (end.log2Radius - start.log2Radius) * e
-            let prec = max(start.center.precision, end.center.precision)
-            v.center = start.center.lerp(to: end.center, e, precision: prec)
+            v.center = start.center.lerp(to: end.center, e, precision: precision)
             return v
         }
-        let lnw = lw0 + Flight.lncosh(r0) - Flight.lncosh(rho * s + r0)
-        v.log2Radius = (lnw + lnL) / ln2
-        let prec = max(start.center.precision, end.center.precision)
-        let lnu = lw0 + Flight.lnsinh(rho * s) - Flight.lncosh(rho * s + r0) - 2 * log(rho)
-        let u = s <= 0 ? 0 : exp(lnu)
+        let lnW = lnW0 + Flight.lncosh(r0) - Flight.lncosh(rho * s + r0)
+        v.log2Radius = (lnW + lnDistance) / log(2.0)
+        // The centre's progress u along the displacement, measured from whichever end is nearer so
+        // that it stays exact at both.
+        let lnU = lnW0 + Flight.lnsinh(rho * s) - Flight.lncosh(rho * s + r0) - 2 * log(rho)
+        let u = s <= 0 ? 0 : exp(lnU)
         if u < 0.5 {
-            v.center = start.center.offset(by: d * u, precision: prec)
+            v.center = start.center.offset(by: displacement * u, precision: precision)
         } else {
             let rest = pathLength - s
-            let ln1u = lw1 + Flight.lnsinh(rho * rest) - Flight.lncosh(rho * rest - r1) - 2 * log(rho)
-            let w = rest <= 0 ? 0 : exp(ln1u)
-            v.center = end.center.offset(by: d * (-w), precision: prec)
+            let lnRemaining = lnW1 + Flight.lnsinh(rho * rest) - Flight.lncosh(rho * rest - r1) - 2 * log(rho)
+            let remaining = rest <= 0 ? 0 : exp(lnRemaining)
+            v.center = end.center.offset(by: displacement * (-remaining), precision: precision)
         }
         return v
     }
 }
+
+/// 0 at 0, 1 at 1, with zero first and second derivatives at both ends.
+private func smootherstep(_ x: Double) -> Double { x * x * x * (x * (x * 6 - 15) + 10) }
 
 /// Destination of the current camera motion.
 public struct Focus: @unchecked Sendable {
@@ -171,16 +181,19 @@ public final class Camera: @unchecked Sendable {
     /// Incremented on every change of `view`.
     public private(set) var version = 0
     public var flipY = false
+    /// Supported zoom range (log2 of the view radius), from the deepest view to the widest.
+    public static let log2RadiusRange = -60_000.0...3.0
+    /// Rates (per second) at which animated zooms and rotations settle and flings slow down.
+    public static let zoomEasing = 14.0, rotationEasing = 12.0, panFriction = 4.5
+
+    /// Animated zoom still to apply (log2 factor), about `zoomAnchor` (drawable pixels).
     private var zoomRemaining = 0.0
-    private var anchorPixel: SIMD2<Double>?
+    private var zoomAnchor: SIMD2<Double>?
+    /// Fling velocity in pixels per second.
     private var velocity = SIMD2<Double>(0, 0)
     private var rotationRemaining = 0.0
     private var flight: Flight?
     private var flightTime = 0.0
-    public var minLog2Radius = -60_000.0
-    public var maxLog2Radius = 3.0
-    /// Rates (per second) at which animated zooms and rotations settle and flings slow down.
-    public static let zoomEasing = 14.0, rotationEasing = 12.0, panFriction = 4.5
 
     public init(view: Viewport) {
         self.view = view.normalizedPrecision()
@@ -198,25 +211,23 @@ public final class Camera: @unchecked Sendable {
     public func focus(width: Int, height: Int) -> Focus? {
         if let f = flight { return Focus(point: f.end.center, log2Radius: f.end.log2Radius) }
         // Zooming in keeps the anchor at a fixed screen offset, so a reference there stays in view.
-        if let a = anchorPixel, zoomRemaining < -0.05 {
+        if let a = zoomAnchor, zoomRemaining < -0.05 {
             return Focus(point: view.point(atPixel: a, width: width, height: height, flipY: flipY),
                          log2Radius: view.log2Radius + zoomRemaining)
         }
         return nil
     }
 
+    /// Moves to a view at once, ending all motion.
     public func jump(to v: Viewport) {
         flight = nil
-        zoomRemaining = 0
-        velocity = .zero
-        rotationRemaining = 0
+        stopMotion()
         view = v.normalizedPrecision()
     }
 
+    /// Flies smoothly to a view; the duration follows the length of the path unless given.
     public func fly(to v: Viewport, duration: Double? = nil) {
-        velocity = .zero
-        zoomRemaining = 0
-        rotationRemaining = 0
+        stopMotion()
         flight = Flight(from: view, to: v.normalizedPrecision(), duration: duration)
         flightTime = 0
     }
@@ -228,23 +239,22 @@ public final class Camera: @unchecked Sendable {
         flight = nil
         if animated {
             zoomRemaining += log2Factor
-            anchorPixel = pixel
+            zoomAnchor = pixel
         } else {
             applyZoom(log2Factor, at: pixel, width: width, height: height)
         }
     }
 
-    private func applyZoom(_ delta: Double, at pixel: SIMD2<Double>, width: Int, height: Int) {
-        let lo = minLog2Radius, hi = maxLog2Radius
-        let target = min(max(view.log2Radius + delta, lo), hi)
+    private func applyZoom(_ log2Factor: Double, at pixel: SIMD2<Double>, width: Int, height: Int) {
+        let range = Camera.log2RadiusRange
+        let target = min(max(view.log2Radius + log2Factor, range.lowerBound), range.upperBound)
         let actual = target - view.log2Radius
         if actual == 0 { return }
+        // the anchor stays put when the centre moves towards it by (1 - 2^actual) of their distance
         let q = pixel - SIMD2(Double(width), Double(height)) * 0.5
-        // keep the anchor fixed: centre moves along (centre - anchor) by (2^delta - 1)
-        let off = view.planeDelta(pixels: q, width: width, height: height, flipY: flipY)
-        let k = 1 - exp2(actual)
+        let toAnchor = view.planeDelta(pixels: q, width: width, height: height, flipY: flipY)
         view.log2Radius = target
-        view.center = view.center.offset(by: off * k, precision: view.center.precision)
+        view.center = view.center.offset(by: toAnchor * (1 - exp2(actual)), precision: view.center.precision)
         view = view.normalizedPrecision()
     }
 
@@ -255,7 +265,10 @@ public final class Camera: @unchecked Sendable {
         view.center = view.center.offset(by: off, precision: view.center.precision)
     }
 
+    /// Keeps panning at `velocity` (pixels per second), slowing down with `panFriction`.
     public func fling(velocity v: SIMD2<Double>) { velocity = v }
+
+    /// Ends flings and animated zooms and rotations where they are.
     public func stopMotion() {
         velocity = .zero
         zoomRemaining = 0
@@ -269,27 +282,23 @@ public final class Camera: @unchecked Sendable {
 
     /// Advances animations; returns true when the view changed.
     public func update(dt: Double, width: Int, height: Int) -> Bool {
-        var changed = false
         if let f = flight {
             flightTime += dt
             let t = flightTime / f.duration
-            view = f.view(at: t).normalizedPrecision()
             if t >= 1 {
                 view = f.end
                 flight = nil
+            } else {
+                view = f.view(at: t).normalizedPrecision()
             }
             return true
         }
+        var changed = false
         if abs(zoomRemaining) > 1e-4 {
-            let step = zoomRemaining * (1 - exp(-dt * Camera.zoomEasing))
+            var step = zoomRemaining * (1 - exp(-dt * Camera.zoomEasing))
+            if abs(zoomRemaining - step) <= 1e-4 { step = zoomRemaining }   // the last step takes the rest
             zoomRemaining -= step
-            if abs(zoomRemaining) <= 1e-4 {
-                applyZoom(step + zoomRemaining, at: anchorPixel ?? SIMD2(Double(width), Double(height)) * 0.5,
-                          width: width, height: height)
-                zoomRemaining = 0
-            } else {
-                applyZoom(step, at: anchorPixel ?? SIMD2(Double(width), Double(height)) * 0.5, width: width, height: height)
-            }
+            applyZoom(step, at: zoomAnchor ?? SIMD2(Double(width), Double(height)) * 0.5, width: width, height: height)
             changed = true
         }
         if simd_length(velocity) > 2 {

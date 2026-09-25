@@ -909,11 +909,6 @@ kernel void present(texture2d<float, access::read> acc [[texture(0)]],
         float3 c11 = acc_texel(acc, i0 + int2(1, 1), P.srcSize, bg);
         c = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
     }
-    c *= P.exposure;
-    if (P.vignette > 0.0f) {
-        float2 uv = (float2(o) + 0.5f) / float2(P.size) - 0.5f;
-        c *= 1.0f - P.vignette * dot(uv, uv);
-    }
     if (P.hdr != 0u) {
         // linear sRGB -> linear Display P3, then expand highlights above a knee into the EDR headroom
         float3 p3 = float3(dot(float3(0.8225f, 0.1774f, 0.0000f), c),
@@ -928,7 +923,8 @@ kernel void present(texture2d<float, access::read> acc [[texture(0)]],
         dst.write(float4(max(p3, 0.0f), 1.0f), o);
         return;
     }
+    // triangular dither of one 8-bit step against banding in smooth gradients
     float n = hash12(float2(o)) + hash12(float2(o) + 17.13f) - 1.0f;
-    float3 s = float3(srgb_encode(c.r), srgb_encode(c.g), srgb_encode(c.b)) + n * P.ditherAmp;
+    float3 s = float3(srgb_encode(c.r), srgb_encode(c.g), srgb_encode(c.b)) + n * (1.0f / 255.0f);
     dst.write(float4(s, 1.0f), o);
 }

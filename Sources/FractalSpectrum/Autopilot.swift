@@ -108,7 +108,7 @@ final class Autopilot {
             target = nil
             dwellUntil = now + 2.5
         }
-        return camera.view.log2Radius > camera.minLog2Radius + 0.01
+        return camera.view.log2Radius > Camera.log2RadiusRange.lowerBound + 0.01
     }
 
     /// Hands the dive's momentum to the camera's own easing, so that stopping slows down smoothly:

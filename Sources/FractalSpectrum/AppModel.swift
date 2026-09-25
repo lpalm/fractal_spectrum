@@ -171,7 +171,6 @@ final class AppModel {
         quality = Quality(rawValue: s.quality) ?? quality
         iter.autoIterations = s.autoIterations
         if let n = s.place.maxIter { iter.maxIter = n }
-        camera.minLog2Radius = formula.minLog2Radius
         camera.jump(to: v)
         lastSavedSession = data
     }
@@ -555,7 +554,6 @@ final class AppModel {
 
     private func formulaChanged(from old: Formula) {
         renderer.formula = formula
-        camera.minLog2Radius = formula.minLog2Radius
         // targets (and a minibrot being approached) belong to the old set
         if formula != old { pilot.reset() }
         if formula.family != old.family || formula.effectivePower != old.effectivePower || formula.julia != old.julia {

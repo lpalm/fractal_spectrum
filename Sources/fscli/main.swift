@@ -1,162 +1,156 @@
+// Headless companion of the app: renders stills and zoom videos, verifies GPU results against a
+// full-precision CPU iteration, benchmarks, and locates minibrots.
 import Foundation
 import AVFoundation
 import CoreGraphics
+import CFractal
 import FractalKit
 
-func import_frames() {
-    let url = URL(fileURLWithPath: args.string("in", "zoom.mp4"))
-    let asset = AVURLAsset(url: url)
-    let gen = AVAssetImageGenerator(asset: asset)
-    gen.requestedTimeToleranceBefore = .zero
-    gen.requestedTimeToleranceAfter = .zero
-    let sem = DispatchSemaphore(value: 0)
-    Task {
-        let duration = (try? await asset.load(.duration)) ?? .zero
-        for (i, f) in args.string("at", "0,0.5,1").split(separator: ",").compactMap({ Double($0) }).enumerated() {
-            let t = CMTimeMultiplyByFloat64(duration, multiplier: min(f, 0.999))
-            if let img = try? await gen.image(at: t).image {
-                let out = URL(fileURLWithPath: args.string("out", "frame") + "_\(i).png")
-                try? Engine.writePNG(img, to: out)
-                print("wrote", out.path)
-            }
-        }
-        sem.signal()
-    }
-    sem.wait()
-}
-
-// Headless renderer: renders stills, verifies GPU results against the CPU oracle and benchmarks.
-
-struct Args {
+/// A command followed by `--name value` options and `--name` switches.
+struct Arguments {
     var command = "render"
     var values: [String: String] = [:]
 
     init() {
-        var it = CommandLine.arguments.dropFirst().makeIterator()
-        if let c = it.next() { command = c }
-        while let a = it.next() {
-            guard a.hasPrefix("--") else { continue }
-            values[String(a.dropFirst(2))] = it.next() ?? ""
+        var rest = CommandLine.arguments.dropFirst()
+        if let first = rest.first, !first.hasPrefix("--") { command = rest.removeFirst() }
+        while let argument = rest.popFirst() {
+            guard argument.hasPrefix("--") else { continue }
+            // a switch is followed by the next option or by nothing
+            let hasValue = rest.first.map { !$0.hasPrefix("--") } ?? false
+            values[String(argument.dropFirst(2))] = hasValue ? rest.removeFirst() : ""
         }
     }
 
-    func string(_ k: String, _ d: String) -> String { values[k] ?? d }
-    func int(_ k: String, _ d: Int) -> Int { values[k].flatMap { Int($0) } ?? d }
-    func double(_ k: String, _ d: Double) -> Double { values[k].flatMap { Double($0) } ?? d }
+    func string(_ name: String, _ fallback: String) -> String { values[name] ?? fallback }
+    func int(_ name: String, _ fallback: Int) -> Int { values[name].flatMap { Int($0) } ?? fallback }
+    func double(_ name: String, _ fallback: Double) -> Double { values[name].flatMap { Double($0) } ?? fallback }
+    func has(_ name: String) -> Bool { values[name] != nil }
 }
 
-let args = Args()
+let arguments = Arguments()
+let engine = Engine()
+Engine.traceTuning = arguments.has("trace")
 
+/// The scene the options describe: --formula, --power, --julia re,im, --re, --im, --zoom (log10 of
+/// the magnification), --rot (degrees), --iter, --fixed, --eps, --noder, --nobla.
 func makeScene() -> FractalScene {
     var formula = Formula()
-    formula.family = FractalFamily(rawValue: args.string("formula", "mandelbrot")) ?? .mandelbrot
-    formula.power = args.int("power", 2)
-    formula.julia = args.values["julia"] != nil
-    if let j = args.values["julia"], let comma = j.firstIndex(of: ",") {
-        formula.juliaRe = Double(j[..<comma]) ?? formula.juliaRe
-        formula.juliaIm = Double(j[j.index(after: comma)...]) ?? formula.juliaIm
-    }
+    formula.family = FractalFamily(rawValue: arguments.string("formula", "mandelbrot")) ?? .mandelbrot
+    formula.power = arguments.int("power", 2)
+    formula.julia = arguments.has("julia")
+    let julia = arguments.string("julia", "").split(separator: ",").compactMap { Double($0) }
+    if julia.count == 2 { (formula.juliaRe, formula.juliaIm) = (julia[0], julia[1]) }
     var view = Viewport.home(for: formula)
-    // --zoom is log10 of the magnification
-    if let z = args.values["zoom"], let l = Double(z) { view.log2Radius = 1 - l / log10(2.0) }
-    let prec = max(64, Int((1 - view.log2Radius) * 1.0) + 96)
-    if let re = args.values["re"], let im = args.values["im"], let p = PlanePoint(re: re, im: im, precision: prec) {
-        view.center = p
+    if let zoom = arguments.values["zoom"].flatMap(Double.init) { view.log2Radius = 1 - zoom / log10(2.0) }
+    let precision = max(64, Int(1 - view.log2Radius) + 96)
+    if let re = arguments.values["re"], let im = arguments.values["im"],
+       let center = PlanePoint(re: re, im: im, precision: precision) {
+        view.center = center
     } else {
-        view.center = view.center.withPrecision(prec)
+        view.center = view.center.withPrecision(precision)
     }
-    view.rotation = args.double("rot", 0) * .pi / 180
+    view.rotation = arguments.double("rot", 0) * .pi / 180
     var iter = IterationSettings()
-    iter.maxIter = args.int("iter", 2000)
-    iter.autoIterations = args.values["fixed"] == nil
-    iter.blaLog2Eps = args.double("eps", -24)
-    iter.derivative = args.values["noder"] == nil
-    iter.useBLA = args.values["nobla"] == nil
+    iter.maxIter = arguments.int("iter", 2000)
+    iter.autoIterations = !arguments.has("fixed")
+    iter.blaLog2Eps = arguments.double("eps", -24)
+    iter.derivative = !arguments.has("noder")
+    iter.useBLA = !arguments.has("nobla")
     return FractalScene(formula: formula, view: view, iter: iter)
 }
 
-func size() -> (Int, Int) {
-    let s = args.string("size", "1280x800").split(separator: "x").compactMap { Int($0) }
-    return s.count == 2 ? (s[0], s[1]) : (1280, 800)
+/// --size WxH.
+func imageSize() -> (width: Int, height: Int) {
+    let size = arguments.string("size", "1280x800").split(separator: "x").compactMap { Int($0) }
+    return size.count == 2 ? (size[0], size[1]) : (1280, 800)
 }
 
-let engine = Engine()
-Engine.traceTuning = args.values["trace"] != nil
-
-switch args.command {
-case "render":
-    var scene = makeScene()
-    let (w, h) = size()
-    let tc = Date()
-    engine.calibrate(scene: &scene, width: w, height: h)
-    print(String(format: "calibrated maxIter %d in %.3fs", scene.iter.maxIter, Date().timeIntervalSince(tc)))
-    scene.iter.autoIterations = false
+/// The colours the options describe: --palette, --density, --mapping, --light, --edge, --offset.
+func makeColor() -> ColorSettings {
     var color = ColorSettings()
-    color.palette = args.int("palette", 0)
-    color.density = args.double("density", color.density)
-    color.mapping = args.int("mapping", color.mapping)
-    color.lightStrength = args.double("light", color.lightStrength)
-    color.edgeStrength = args.double("edge", color.edgeStrength)
-    color.offset = args.double("offset", color.offset)
-    let t0 = Date()
-    guard let img = engine.renderStill(scene: scene, color: color,
-                                       options: .init(width: w, height: h, samples: args.int("samples", 4))) else {
+    color.palette = arguments.int("palette", 0)
+    color.density = arguments.double("density", color.density)
+    color.mapping = arguments.int("mapping", color.mapping)
+    color.lightStrength = arguments.double("light", color.lightStrength)
+    color.edgeStrength = arguments.double("edge", color.edgeStrength)
+    color.offset = arguments.double("offset", color.offset)
+    return color
+}
+
+func render() throws {
+    var scene = makeScene()
+    let (width, height) = imageSize()
+    let calibrationStart = Date()
+    engine.calibrate(scene: &scene, width: width, height: height)
+    print(String(format: "calibrated maxIter %d in %.3fs", scene.iter.maxIter, Date().timeIntervalSince(calibrationStart)))
+    scene.iter.autoIterations = false
+    let start = Date()
+    guard let image = engine.renderStill(scene: scene, color: makeColor(),
+                                         options: .init(width: width, height: height, samples: arguments.int("samples", 4)))
+    else {
         print("render failed")
         exit(1)
     }
-    let out = URL(fileURLWithPath: args.string("out", "out.png"))
-    try Engine.writePNG(img, to: out)
-    print(String(format: "rendered %dx%d in %.3fs -> %@", w, h, Date().timeIntervalSince(t0), out.path))
+    let output = URL(fileURLWithPath: arguments.string("out", "out.png"))
+    try Engine.writePNG(image, to: output)
+    print(String(format: "rendered %dx%d in %.3fs -> %@", width, height, Date().timeIntervalSince(start), output.path))
+}
 
-case "verify":
-    // Compares GPU escape iterations with a full-precision CPU iteration of every sample.
+/// Compares GPU escape iterations with a full-precision CPU iteration of every sample.
+func verify() {
     var scene = makeScene()
     scene.iter.autoIterations = false
-    let (w, h) = (args.int("w", 48), args.int("h", 32))
-    guard let map = engine.iterationMap(scene: scene, width: w, height: h) else { exit(1) }
-    var exact = 0, close = 0, bad = 0, interiorMismatch = 0
-    var worst = 0
-    for y in 0..<h {
-        for x in 0..<w {
-            let p = Engine.samplePoint(scene: scene, width: w, height: h, x: x, y: y)
-            let o = Engine.oracle(formula: scene.formula, point: p, maxIter: map.plan.effectiveMaxIter,
-                                  bailout: scene.iter.bailout)
-            let g = map.n[y * w + x]
-            let gi = g == 0xFFFF_FFFF ? map.plan.effectiveMaxIter : Int(g)
-            let d = abs(gi - o.n)
-            if d > 2 && bad < args.int("dump", 0) {
-                print("  (\(x),\(y)) gpu \(g == 0xFFFF_FFFF ? "inside" : String(g)) cpu \(o.n)  c=\(p.re.string(digits: 20)), \(p.im.string(digits: 20))")
+    let (width, height) = (arguments.int("w", 48), arguments.int("h", 32))
+    guard let map = engine.iterationMap(scene: scene, width: width, height: height) else { exit(1) }
+    let maxIter = map.plan.effectiveMaxIter
+    var exact = 0, close = 0, off = 0, interiorMismatch = 0, worst = 0
+    for y in 0..<height {
+        for x in 0..<width {
+            let point = Engine.samplePoint(scene: scene, width: width, height: height, x: x, y: y)
+            let cpu = Engine.oracle(formula: scene.formula, point: point, maxIter: maxIter, bailout: scene.iter.bailout).n
+            let n = map.n[y * width + x]
+            let gpu = n == FS_INTERIOR ? maxIter : Int(n)
+            let difference = abs(gpu - cpu)
+            if difference > 2 && off < arguments.int("dump", 0) {
+                print("  (\(x),\(y)) gpu \(n == FS_INTERIOR ? "inside" : String(n)) cpu \(cpu)  c=\(point.re.string(digits: 20)), \(point.im.string(digits: 20))")
             }
-            if d == 0 { exact += 1 } else if d <= 2 { close += 1 } else {
-                bad += 1
-                worst = max(worst, d)
-                if (g == 0xFFFF_FFFF) != (o.n >= map.plan.effectiveMaxIter) { interiorMismatch += 1 }
+            if difference == 0 {
+                exact += 1
+            } else if difference <= 2 {
+                close += 1
+            } else {
+                off += 1
+                worst = max(worst, difference)
+                if (n == FS_INTERIOR) != (cpu >= maxIter) { interiorMismatch += 1 }
             }
         }
     }
-    let total = w * h
-    let escapedN = map.n.filter { $0 != 0xFFFF_FFFF }
-    print("escaped \(escapedN.count)/\(total) range \(escapedN.min() ?? 0)...\(escapedN.max() ?? 0)", terminator: "  ")
+    let total = Double(width * height)
+    let escaped = map.n.filter { $0 != FS_INTERIOR }
+    print("escaped \(escaped.count)/\(width * height) range \(escaped.min() ?? 0)...\(escaped.max() ?? 0)", terminator: "  ")
     print(String(format: "perturbed=%@ deep=%@ bla=%@ maxIter=%d  exact %.1f%%  within2 %.1f%%  off %.1f%% (interior mismatch %d, worst %d)",
-                 "\(map.plan.perturbed)", "\(map.plan.deep)", "\(map.plan.usedBLA)", map.plan.effectiveMaxIter,
-                 100 * Double(exact) / Double(total), 100 * Double(close) / Double(total),
-                 100 * Double(bad) / Double(total), interiorMismatch, worst))
+                 "\(map.plan.perturbed)", "\(map.plan.deep)", "\(map.plan.usedBLA)", maxIter,
+                 100 * Double(exact) / total, 100 * Double(close) / total, 100 * Double(off) / total,
+                 interiorMismatch, worst))
+}
 
-case "bench":
+func bench() {
     var scene = makeScene()
-    let (w, h) = size()
-    engine.calibrate(scene: &scene, width: w, height: h)
-    let ms = engine.benchmarkPass(scene: scene, width: w, height: h, runs: args.int("runs", 5),
-                                  warmup: args.double("warmup", 2), interior: args.values["nointerior"] == nil)
-    print(String(format: "%dx%d maxIter %d: best %.2f ms GPU", w, h, scene.iter.maxIter, ms))
+    let (width, height) = imageSize()
+    engine.calibrate(scene: &scene, width: width, height: height)
+    let ms = engine.benchmarkPass(scene: scene, width: width, height: height, runs: arguments.int("runs", 5),
+                                  warmup: arguments.double("warmup", 2), interior: !arguments.has("nointerior"))
+    print(String(format: "%dx%d maxIter %d: best %.2f ms GPU", width, height, scene.iter.maxIter, ms))
+}
 
-case "dive":
-    // Follows the boundary: repeatedly re-centres on a high-iteration escaped sample and zooms in.
+/// Follows the boundary: repeatedly re-centres on a high-iteration escaped sample and zooms in.
+func dive() {
     var scene = makeScene()
-    let target = args.double("to", 100)
-    let stepLog10 = args.double("step", 2.5)
-    var seed = UInt64(args.int("seed", 1))
-    func rand() -> Double {
+    let target = arguments.double("to", 100)
+    let stepLog10 = arguments.double("step", 2.5)
+    var seed = UInt64(arguments.int("seed", 1))
+    func random() -> Double {
         seed = seed &* 6364136223846793005 &+ 1442695040888963407
         return Double(seed >> 11) / Double(1 << 53)
     }
@@ -164,127 +158,180 @@ case "dive":
     while scene.view.zoomLog10 < target {
         engine.calibrate(scene: &scene, width: n, height: n)
         guard let map = engine.iterationMap(scene: scene, width: n, height: n) else { break }
-        var cands: [(Int, Int, UInt32)] = []
-        for y in 8..<(n - 8) { for x in 8..<(n - 8) where map.n[y * n + x] != 0xFFFF_FFFF { cands.append((x, y, map.n[y * n + x])) } }
-        if cands.isEmpty { print("no escaped samples; stopping"); break }
-        cands.sort { $0.2 > $1.2 }
-        let pick = cands[Int(rand() * Double(max(1, cands.count / 20)))]
-        let p = Engine.samplePoint(scene: scene, width: n, height: n, x: pick.0, y: pick.1)
-        let newLog2R = scene.view.log2Radius - stepLog10 / log10(2.0)
-        let prec = max(64, Int(1 - newLog2R) + 96)
-        scene.view.center = p.withPrecision(prec)
-        scene.view.log2Radius = newLog2R
-        print(String(format: "zoom 1e%.1f  maxIter %d  iter %d", scene.view.zoomLog10, scene.iter.maxIter, pick.2))
+        var candidates: [(x: Int, y: Int, iterations: UInt32)] = []
+        for y in 8..<(n - 8) {
+            for x in 8..<(n - 8) where map.n[y * n + x] != FS_INTERIOR { candidates.append((x, y, map.n[y * n + x])) }
+        }
+        if candidates.isEmpty {
+            print("no escaped samples; stopping")
+            break
+        }
+        candidates.sort { $0.iterations > $1.iterations }
+        let pick = candidates[Int(random() * Double(max(1, candidates.count / 20)))]
+        let point = Engine.samplePoint(scene: scene, width: n, height: n, x: pick.x, y: pick.y)
+        let log2Radius = scene.view.log2Radius - stepLog10 / log10(2.0)
+        scene.view.center = point.withPrecision(max(64, Int(1 - log2Radius) + 96))
+        scene.view.log2Radius = log2Radius
+        print(String(format: "zoom 1e%.1f  maxIter %d  iter %d", scene.view.zoomLog10, scene.iter.maxIter, pick.iterations))
     }
-    print("--re \(scene.view.center.re.string(digits: Int(scene.view.zoomLog10) + 12)) --im \(scene.view.center.im.string(digits: Int(scene.view.zoomLog10) + 12)) --zoom \(scene.view.zoomLog10)")
+    let digits = Int(scene.view.zoomLog10) + 12
+    print("--re \(scene.view.center.re.string(digits: digits)) --im \(scene.view.center.im.string(digits: digits)) --zoom \(scene.view.zoomLog10)")
+}
 
-case "stats":
-    // Iteration statistics of one pass at a fixed iteration limit.
+/// Iteration statistics of one pass at a fixed iteration limit.
+func stats() {
     let scene = makeScene()
-    let (w, h) = (args.int("w", 64), args.int("h", 40))
-    guard let cb = engine.queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { exit(1) }
+    let (width, height) = (arguments.int("w", 64), arguments.int("h", 40))
+    guard let commandBuffer = engine.queue.makeCommandBuffer(),
+          let encoder = commandBuffer.makeComputeCommandEncoder() else { exit(1) }
     let slot = engine.nextStatsSlot()
-    let g = engine.makeGBuffer(samples: w * h)
-    guard let plan = engine.makePlan(scene: scene, grid: .init(width: w, height: h), enc: enc, blocking: true, statsSlot: slot) else { exit(1) }
-    engine.encodeStatsReset(enc, slot: slot)
-    engine.encodeIterate(enc, plan: plan, gbuf: g, origin: .zero, size: SIMD2(UInt32(w), UInt32(h)), bufOrigin: .zero, bufStride: UInt32(w))
-    enc.endEncoding()
-    cb.commit()
-    cb.waitUntilCompleted()
+    guard let plan = engine.makePlan(scene: scene, grid: .init(width: width, height: height), encoder: encoder,
+                                     blocking: true, statsSlot: slot) else { exit(1) }
+    engine.encodeStatsReset(encoder, slot: slot)
+    engine.encodeIterate(encoder, plan: plan, into: engine.makeGBuffer(samples: width * height), origin: .zero,
+                         size: SIMD2(UInt32(width), UInt32(height)), bufferOrigin: .zero, bufferStride: UInt32(width))
+    encoder.endEncoding()
+    commandBuffer.commit()
+    commandBuffer.waitUntilCompleted()
     let s = engine.readStats(slot)
     print(String(format: "maxIter %d (eff %d): escaped %u late %u unresolved %u interior %u  escape range %u...%u  gpu %.1f ms  mean iterations %.0f",
                  scene.iter.maxIter, plan.effectiveMaxIter, s.escaped, s.lateEscaped, s.unresolved, s.interior,
-                 s.minIter, s.maxIter, (cb.gpuEndTime - cb.gpuStartTime) * 1000, Double(s.iterations) / Double(w * h)))
+                 s.minIter, s.maxIter, (commandBuffer.gpuEndTime - commandBuffer.gpuStartTime) * 1000,
+                 Double(s.iterations) / Double(width * height)))
+}
 
-case "video":
+func video() throws {
     let scene = makeScene()
-    let (w, h) = size()
+    let (width, height) = imageSize()
     var color = ColorSettings()
-    color.palette = args.int("palette", 0)
+    color.palette = arguments.int("palette", 0)
     let job = Exporter.VideoJob(formula: scene.formula, target: scene.view, start: Viewport.home(for: scene.formula),
-                                color: color, width: w, height: h, fps: args.int("fps", 30),
-                                duration: args.double("duration", 10), samples: args.int("samples", 2),
-                                codec: args.values["prores"] != nil ? .prores : .hevc, spin: args.double("spin", 0))
-    let out = URL(fileURLWithPath: args.string("out", "zoom.mp4"))
-    let t0 = Date()
-    var last = 0.0
-    try Exporter().exportVideo(job, to: out) { p, _ in
-        if p - last >= 0.1 || p >= 1 {
-            last = p
-            print(String(format: "  %3.0f%%  %.1fs", p * 100, Date().timeIntervalSince(t0)))
+                                color: color, width: width, height: height, fps: arguments.int("fps", 30),
+                                duration: arguments.double("duration", 10), samples: arguments.int("samples", 2),
+                                codec: arguments.has("prores") ? .prores : .hevc, spin: arguments.double("spin", 0))
+    let output = URL(fileURLWithPath: arguments.string("out", "zoom.mp4"))
+    let start = Date()
+    var reported = 0.0
+    try Exporter().exportVideo(job, to: output) { progress, _ in
+        if progress - reported >= 0.1 || progress >= 1 {
+            reported = progress
+            print(String(format: "  %3.0f%%  %.1fs", progress * 100, Date().timeIntervalSince(start)))
         }
         return true
     }
-    print(String(format: "video %d frames in %.1fs -> %@", job.frameCount, Date().timeIntervalSince(t0), out.path))
+    print(String(format: "video %d frames in %.1fs -> %@", job.frameCount, Date().timeIntervalSince(start), output.path))
+}
 
-case "frames":
-    // Extracts frames at the given fractions of a video as PNGs.
-    import_frames()
+/// Extracts frames at the given fractions (--at) of a video (--in) as PNGs.
+func extractFrames() {
+    let asset = AVURLAsset(url: URL(fileURLWithPath: arguments.string("in", "zoom.mp4")))
+    let generator = AVAssetImageGenerator(asset: asset)
+    generator.requestedTimeToleranceBefore = .zero
+    generator.requestedTimeToleranceAfter = .zero
+    let done = DispatchSemaphore(value: 0)
+    Task {
+        let duration = (try? await asset.load(.duration)) ?? .zero
+        for (i, fraction) in arguments.string("at", "0,0.5,1").split(separator: ",").compactMap({ Double($0) }).enumerated() {
+            let time = CMTimeMultiplyByFloat64(duration, multiplier: min(fraction, 0.999))
+            if let image = try? await generator.image(at: time).image {
+                let output = URL(fileURLWithPath: arguments.string("out", "frame") + "_\(i).png")
+                try? Engine.writePNG(image, to: output)
+                print("wrote", output.path)
+            }
+        }
+        done.signal()
+    }
+    done.wait()
+}
 
-case "compare":
-    // Side-by-side iteration images: GPU (left) and full-precision CPU (right), log-scaled greyscale.
+/// Side-by-side iteration images: GPU (left) and full-precision CPU (right), log-scaled greyscale.
+func compare() throws {
     var scene = makeScene()
     scene.iter.autoIterations = false
-    let (w, h) = (args.int("w", 160), args.int("h", 100))
-    guard let map = engine.iterationMap(scene: scene, width: w, height: h) else { exit(1) }
-    var cpu = [Int](repeating: 0, count: w * h)
-    DispatchQueue.concurrentPerform(iterations: h) { y in
-        for x in 0..<w {
-            let p = Engine.samplePoint(scene: scene, width: w, height: h, x: x, y: y)
-            cpu[y * w + x] = Engine.oracle(formula: scene.formula, point: p, maxIter: map.plan.effectiveMaxIter,
-                                           bailout: scene.iter.bailout).n
+    let (width, height) = (arguments.int("w", 160), arguments.int("h", 100))
+    guard let map = engine.iterationMap(scene: scene, width: width, height: height) else { exit(1) }
+    let maxIter = Double(map.plan.effectiveMaxIter)
+    var cpu = [Int](repeating: 0, count: width * height)
+    DispatchQueue.concurrentPerform(iterations: height) { y in
+        for x in 0..<width {
+            let point = Engine.samplePoint(scene: scene, width: width, height: height, x: x, y: y)
+            cpu[y * width + x] = Engine.oracle(formula: scene.formula, point: point, maxIter: map.plan.effectiveMaxIter,
+                                               bailout: scene.iter.bailout).n
         }
     }
-    let maxI = Double(map.plan.effectiveMaxIter)
-    var px = [UInt8](repeating: 255, count: w * 2 * h * 4)
+    var pixels = [UInt8](repeating: 255, count: width * 2 * height * 4)
     func put(_ x: Int, _ y: Int, _ n: Double) {
-        let v = n >= maxI ? 0 : UInt8(max(0, min(255, 40 + 215 * log(1 + n) / log(1 + maxI))))
-        let i = (y * w * 2 + x) * 4
-        px[i] = v; px[i + 1] = v; px[i + 2] = v
+        let grey = n >= maxIter ? 0 : UInt8(max(0, min(255, 40 + 215 * log(1 + n) / log(1 + maxIter))))
+        let i = (y * width * 2 + x) * 4
+        pixels[i] = grey
+        pixels[i + 1] = grey
+        pixels[i + 2] = grey
     }
-    for y in 0..<h {
-        for x in 0..<w {
-            let g = map.n[y * w + x]
-            put(x, y, g == 0xFFFF_FFFF ? maxI : Double(g))
-            put(x + w, y, Double(cpu[y * w + x]))
+    for y in 0..<height {
+        for x in 0..<width {
+            let n = map.n[y * width + x]
+            put(x, y, n == FS_INTERIOR ? maxIter : Double(n))
+            put(x + width, y, Double(cpu[y * width + x]))
         }
     }
-    let cs = CGColorSpace(name: CGColorSpace.sRGB)!
-    let ctx = CGContext(data: &px, width: w * 2, height: h, bitsPerComponent: 8, bytesPerRow: w * 8, space: cs,
-                        bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
-    try Engine.writePNG(ctx.makeImage()!, to: URL(fileURLWithPath: args.string("out", "compare.png")))
+    let context = CGContext(data: &pixels, width: width * 2, height: height, bitsPerComponent: 8, bytesPerRow: width * 8,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+    try Engine.writePNG(context.makeImage()!, to: URL(fileURLWithPath: arguments.string("out", "compare.png")))
     print("wrote compare image")
+}
 
-case "minibrot":
-    // Finds the lowest-period minibrot in the view and prints its location, size and suggested views.
-    let scene = makeScene()
-    let v = scene.view
-    let t0 = Date()
-    let p = Minibrot.period(center: v.center, log2Radius: v.log2Radius, maxPeriod: args.int("maxperiod", 2_000_000))
-    guard p > 0 else { print("no period found"); exit(1) }
-    let prec = max(v.center.precision, Int(-v.log2Radius) * 2 + 128)
-    guard let n = Minibrot.nucleus(near: v.center, period: p, precision: prec) else { print("newton failed"); exit(1) }
-    let (ls, angle, cardioid) = Minibrot.size(nucleus: n, period: p)
-    let dist = n.minus(v.center).log2Abs - v.log2Radius
-    let digits = Int(-ls * 0.30103) + 12
-    print(String(format: "period %d %@, size 2^%.1f (1e%.1f), angle %.1f°, offset %.2f radii, %.2fs", p,
-                 cardioid ? "cardioid" : "disc", ls, ls * 0.30103, angle * 180 / .pi, exp2(dist), Date().timeIntervalSince(t0)))
-    print("--re \(n.re.string(digits: digits)) --im \(n.im.string(digits: digits))")
-    let zMini = (1 - (ls + log2(3.0))) * log10(2.0)
-    print(String(format: "minibrot view --zoom %.2f ; embedded julia --zoom %.2f", zMini, (1 - (ls + v.log2Radius) / 2) * log10(2.0)))
-
-case "flighttest":
-    let a = Viewport.home(for: Formula())
-    let b = makeScene().view
-    let f = Flight(from: a, to: b)
-    print(String(format: "path %.1f duration %.1fs", f.pathLength, f.duration))
-    for t in [0.0, 0.001, 0.1, 0.3, 0.5, 0.7, 0.9, 0.999, 1.0] {
-        let v = f.view(at: t)
-        let dEnd = v.center.minus(b.center).log2Abs - v.log2Radius
-        let dStart = v.center.minus(a.center).log2Abs - v.log2Radius
-        print(String(format: "t %.3f  zoom 1e%.2f  log2(|c-end|/r) %.2f  log2(|c-start|/r) %.2f", t, v.zoomLog10, dEnd, dStart))
+/// Finds the lowest-period minibrot in the view and prints its location, size and suggested views.
+func minibrot() {
+    let view = makeScene().view
+    let start = Date()
+    let period = Minibrot.period(center: view.center, log2Radius: view.log2Radius,
+                                 maxPeriod: arguments.int("maxperiod", 2_000_000))
+    guard period > 0 else {
+        print("no period found")
+        exit(1)
     }
+    let precision = max(view.center.precision, Int(-view.log2Radius) * 2 + 128)
+    guard let nucleus = Minibrot.nucleus(near: view.center, period: period, precision: precision) else {
+        print("newton failed")
+        exit(1)
+    }
+    let (log2Size, angle, cardioid) = Minibrot.size(nucleus: nucleus, period: period)
+    let log2Distance = nucleus.minus(view.center).log2Abs - view.log2Radius
+    let log10Of2 = log10(2.0)
+    let digits = Int(-log2Size * log10Of2) + 12
+    print(String(format: "period %d %@, size 2^%.1f (1e%.1f), angle %.1f°, offset %.2f radii, %.2fs", period,
+                 cardioid ? "cardioid" : "disc", log2Size, log2Size * log10Of2, angle * 180 / .pi, exp2(log2Distance),
+                 Date().timeIntervalSince(start)))
+    print("--re \(nucleus.re.string(digits: digits)) --im \(nucleus.im.string(digits: digits))")
+    print(String(format: "minibrot view --zoom %.2f ; embedded julia --zoom %.2f", (1 - (log2Size + log2(3.0))) * log10Of2,
+                 (1 - (log2Size + view.log2Radius) / 2) * log10Of2))
+}
 
+/// Samples a flight from the overview to the view, checking that both ends stay exact.
+func flightTest() {
+    let start = Viewport.home(for: Formula())
+    let end = makeScene().view
+    let flight = Flight(from: start, to: end)
+    print(String(format: "path %.1f duration %.1fs", flight.pathLength, flight.duration))
+    for t in [0.0, 0.001, 0.1, 0.3, 0.5, 0.7, 0.9, 0.999, 1.0] {
+        let v = flight.view(at: t)
+        let fromEnd = v.center.minus(end.center).log2Abs - v.log2Radius
+        let fromStart = v.center.minus(start.center).log2Abs - v.log2Radius
+        print(String(format: "t %.3f  zoom 1e%.2f  log2(|c-end|/r) %.2f  log2(|c-start|/r) %.2f", t, v.zoomLog10, fromEnd, fromStart))
+    }
+}
+
+switch arguments.command {
+case "render": try render()
+case "verify": verify()
+case "bench": bench()
+case "dive": dive()
+case "stats": stats()
+case "video": try video()
+case "frames": extractFrames()
+case "compare": try compare()
+case "minibrot": minibrot()
+case "flighttest": flightTest()
 default:
     print("usage: fscli render|verify|bench|dive|stats|video|frames|compare|minibrot|flighttest [--formula f] [--re x --im y] [--zoom log10] [--iter n] [--size WxH]")
 }

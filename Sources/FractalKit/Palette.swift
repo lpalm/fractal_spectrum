@@ -2,24 +2,11 @@ import Foundation
 import Metal
 
 /// A cyclic colour gradient defined by sRGB stops, interpolated smoothly in OKLab.
-/// FNV-1a hash in hexadecimal: stable across launches, unlike `hashValue`.
-public func stableHash(_ s: String) -> String {
-    var h: UInt64 = 0xcbf29ce484222325
-    for b in s.utf8 {
-        h ^= UInt64(b)
-        h &*= 0x100000001b3
-    }
-    return String(h, radix: 16)
-}
-
-/// Changes whenever the kernels or palettes do: a version for caches of rendered images.
-public let renderSignature = stableHash(fractalShaderSource + Palette.all.map { "\($0.id)\($0.stops)" }.joined())
-
 public struct Palette: Sendable, Identifiable {
     public let id: Int
     public let name: String
     /// Positions in [0, 1) with sRGB colours in 0...255.
-    let stops: [(Double, SIMD3<Double>)]
+    let stops: [(position: Double, color: SIMD3<Double>)]
 
     public static let all: [Palette] = [
         Palette(id: 0, name: "Classic", stops: [
@@ -61,45 +48,44 @@ public struct Palette: Sendable, Identifiable {
         Palette.spectrum(id: 9),
     ]
 
-    init(id: Int, name: String, stops: [(Double, SIMD3<Double>)]) {
+    init(id: Int, name: String, stops: [(position: Double, color: SIMD3<Double>)]) {
         self.id = id
         self.name = name
         self.stops = stops
     }
 
     private static func spectrum(id: Int) -> Palette {
-        let stops = (0..<12).map { i -> (Double, SIMD3<Double>) in
-            let h = Double(i) / 12 * 2 * .pi
-            let lab = SIMD3(0.74, 0.14 * cos(h), 0.14 * sin(h))
-            return (Double(i) / 12, OKLab.toSRGB255(lab))
+        let stops = (0..<12).map { i in
+            let hue = Double(i) / 12 * 2 * .pi
+            return (position: Double(i) / 12, color: OKLab.toSRGB255(SIMD3(0.74, 0.14 * cos(hue), 0.14 * sin(hue))))
         }
         return Palette(id: id, name: "Spectrum", stops: stops)
     }
 
     /// Linear-light RGB samples of the full cycle.
     public func samples(_ n: Int) -> [SIMD3<Float>] {
-        let labs = stops.map { OKLab.fromSRGB255($0.1) }
-        let pos = stops.map { $0.0 }
+        let labs = stops.map { OKLab.fromSRGB255($0.color) }
+        let positions = stops.map(\.position)
         let k = stops.count
         return (0..<n).map { i in
             let t = Double(i) / Double(n)
             var j = k - 1
-            for s in 0..<k where pos[s] <= t { j = s }
+            for s in 0..<k where positions[s] <= t { j = s }
             let j1 = (j + 1) % k
-            let t0 = pos[j]
-            let t1 = j1 == 0 ? 1.0 + pos[0] : pos[j1]
+            let t0 = positions[j]
+            let t1 = j1 == 0 ? 1.0 + positions[0] : positions[j1]
             let u = (t - t0) / max(t1 - t0, 1e-9)
             // Catmull-Rom through neighbouring stops, cyclic
             let p0 = labs[(j + k - 1) % k], p1 = labs[j], p2 = labs[j1], p3 = labs[(j + 2) % k]
             let u2 = u * u, u3 = u2 * u
             var lab = 0.5 * (2 * p1 + (p2 - p0) * u + (2 * p0 - 5 * p1 + 4 * p2 - p3) * u2 + (3 * p1 - p0 - 3 * p2 + p3) * u3)
             lab.x = min(max(lab.x, 0), 1)
-            let rgb = OKLab.toLinear(lab)
-            return SIMD3<Float>(Float(min(max(rgb.x, 0), 1)), Float(min(max(rgb.y, 0), 1)), Float(min(max(rgb.z, 0), 1)))
+            return SIMD3<Float>(OKLab.toLinear(lab).clamped(lowerBound: .zero, upperBound: .one))
         }
     }
 }
 
+/// Conversions between sRGB, linear RGB and OKLab (Björn Ottosson's perceptual colour space).
 enum OKLab {
     static func srgbToLinear(_ c: Double) -> Double { c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
     static func linearToSrgb(_ c: Double) -> Double { c <= 0.0031308 ? 12.92 * c : 1.055 * pow(c, 1 / 2.4) - 0.055 }
@@ -127,8 +113,8 @@ enum OKLab {
     }
 
     static func toSRGB255(_ lab: SIMD3<Double>) -> SIMD3<Double> {
-        let l = toLinear(lab)
-        return SIMD3(linearToSrgb(min(max(l.x, 0), 1)), linearToSrgb(min(max(l.y, 0), 1)), linearToSrgb(min(max(l.z, 0), 1))) * 255
+        let l = toLinear(lab).clamped(lowerBound: .zero, upperBound: .one)
+        return SIMD3(linearToSrgb(l.x), linearToSrgb(l.y), linearToSrgb(l.z)) * 255
     }
 }
 

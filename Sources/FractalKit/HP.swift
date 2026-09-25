@@ -3,6 +3,7 @@ import CFractal
 
 /// Immutable arbitrary-precision real number (MPFR). Operations return new values.
 public final class HPFloat: @unchecked Sendable {
+    /// The number in the C library, owned by this object.
     let ptr: OpaquePointer
 
     private init(ptr: OpaquePointer) { self.ptr = ptr }
@@ -60,7 +61,6 @@ public final class HPFloat: @unchecked Sendable {
         defer { fs_free(c) }
         return String(cString: c)
     }
-
 }
 
 /// Point in the complex plane at arbitrary precision.
@@ -90,6 +90,7 @@ public struct PlanePoint: @unchecked Sendable {
         PlanePoint(re: re.withPrecision(bits), im: im.withPrecision(bits))
     }
 
+    /// self + d at `precision` bits (defaults to the current precision of each component).
     public func offset(by d: ComplexExp, precision: Int? = nil) -> PlanePoint {
         PlanePoint(re: re.adding(d.re, precision: precision), im: im.adding(d.im, precision: precision))
     }
@@ -99,6 +100,7 @@ public struct PlanePoint: @unchecked Sendable {
         ComplexExp(re: re.minus(other.re), im: im.minus(other.im))
     }
 
+    /// self + (other - self) * t at `precision` bits.
     public func lerp(to other: PlanePoint, _ t: Double, precision: Int) -> PlanePoint {
         PlanePoint(re: re.lerp(to: other.re, t, precision: precision), im: im.lerp(to: other.im, t, precision: precision))
     }
@@ -126,10 +128,11 @@ public struct FloatExp: Sendable, CustomStringConvertible {
     /// log2 |value|; -infinity for zero.
     public var log2Abs: Double { m == 0 ? -.infinity : log2(abs(m)) + Double(e) }
 
-    public static func fromLog2(_ l: Double, sign: Double = 1) -> FloatExp {
+    /// 2^l (zero when l is not finite).
+    public static func fromLog2(_ l: Double) -> FloatExp {
         guard l.isFinite else { return .zero }
         let i = floor(l)
-        return FloatExp(sign * exp2(l - i), Int(i))
+        return FloatExp(exp2(l - i), Int(i))
     }
 
     public static func + (a: FloatExp, b: FloatExp) -> FloatExp {
@@ -143,9 +146,6 @@ public struct FloatExp: Sendable, CustomStringConvertible {
     public static func - (a: FloatExp, b: FloatExp) -> FloatExp { a + (-b) }
     public static func * (a: FloatExp, b: FloatExp) -> FloatExp { FloatExp(a.m * b.m, a.e + b.e) }
     public static func * (a: FloatExp, b: Double) -> FloatExp { FloatExp(a.m * b, a.e) }
-
-    /// Value as a Double (0 or infinity outside the representable range).
-    public var double: Double { scalbn(m, e) }
 
     public var description: String {
         if m == 0 { return "0" }
@@ -169,17 +169,25 @@ public struct ComplexExp: Sendable {
 
     public static let zero = ComplexExp(re: .zero, im: .zero)
 
+    /// The larger exponent of the non-zero components; nil for zero.
+    private var sharedExponent: Int? {
+        switch (re.m == 0, im.m == 0) {
+        case (true, true): nil
+        case (true, false): im.e
+        case (false, true): re.e
+        case (false, false): max(re.e, im.e)
+        }
+    }
+
     public var log2Abs: Double {
-        let e = max(re.m == 0 ? Int.min / 4 : re.e, im.m == 0 ? Int.min / 4 : im.e)
-        if re.m == 0 && im.m == 0 { return -.infinity }
+        guard let e = sharedExponent else { return -.infinity }
         let x = scalbn(re.m, re.e - e), y = scalbn(im.m, im.e - e)
         return 0.5 * log2(x * x + y * y) + Double(e)
     }
 
-    /// Shared-exponent float mantissas (value = m * 2^e) as used by the kernels.
+    /// Float mantissas with a shared exponent (value = m * 2^e), the form the kernels take.
     public var shared: (m: SIMD2<Float>, e: Int32) {
-        if re.m == 0 && im.m == 0 { return (SIMD2(0, 0), zeroExponent) }
-        let e = max(re.m == 0 ? Int.min / 4 : re.e, im.m == 0 ? Int.min / 4 : im.e)
+        guard let e = sharedExponent else { return (SIMD2(0, 0), zeroExponent) }
         let x = scalbn(re.m, re.e - e), y = scalbn(im.m, im.e - e)
         return (SIMD2(Float(x), Float(y)), Int32(clamping: e))
     }

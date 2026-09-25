@@ -7,21 +7,22 @@ public enum FractalFamily: String, CaseIterable, Codable, Sendable, Identifiable
 
     public var id: String { rawValue }
 
+    /// The kernels' identifier (FS_FORMULA_*).
     var formulaID: Int32 {
         switch self {
-        case .mandelbrot: return Int32(FS_FORMULA_MANDEL)
-        case .tricorn: return Int32(FS_FORMULA_TRICORN)
-        case .burningShip: return Int32(FS_FORMULA_SHIP)
-        case .celtic: return Int32(FS_FORMULA_CELTIC)
+        case .mandelbrot: Int32(FS_FORMULA_MANDEL)
+        case .tricorn: Int32(FS_FORMULA_TRICORN)
+        case .burningShip: Int32(FS_FORMULA_SHIP)
+        case .celtic: Int32(FS_FORMULA_CELTIC)
         }
     }
 
     public var displayName: String {
         switch self {
-        case .mandelbrot: return "Mandelbrot"
-        case .tricorn: return "Tricorn"
-        case .burningShip: return "Burning Ship"
-        case .celtic: return "Celtic"
+        case .mandelbrot: "Mandelbrot"
+        case .tricorn: "Tricorn"
+        case .burningShip: "Burning Ship"
+        case .celtic: "Celtic"
         }
     }
 
@@ -46,16 +47,13 @@ public struct Formula: Hashable, Codable, Sendable {
         self.juliaIm = juliaIm
     }
 
+    /// The power iterated: the Mandelbrot family takes powers 2 to 8 (Multibrots), the others are quadratic.
     public var effectivePower: Int { family == .mandelbrot ? max(2, min(power, 8)) : 2 }
 
     public var displayName: String {
-        var s = family == .mandelbrot && effectivePower > 2 ? "Multibrot z^\(effectivePower)" : family.displayName
-        if julia { s += " Julia" }
-        return s
+        let name = family == .mandelbrot && effectivePower > 2 ? "Multibrot z^\(effectivePower)" : family.displayName
+        return julia ? name + " Julia" : name
     }
-
-    /// Deepest supported zoom (log2 of the view radius).
-    public var minLog2Radius: Double { -60_000 }
 }
 
 /// What part of the plane is on screen.
@@ -63,6 +61,7 @@ public struct Viewport: @unchecked Sendable {
     public var center: PlanePoint
     /// log2 of half the shorter side of the view in plane units.
     public var log2Radius: Double
+    /// Angle of the screen's x axis in the plane, in radians.
     public var rotation: Double
 
     public init(center: PlanePoint, log2Radius: Double, rotation: Double = 0) {
@@ -71,6 +70,7 @@ public struct Viewport: @unchecked Sendable {
         self.rotation = rotation
     }
 
+    /// The overview a formula opens with.
     public static func home(for formula: Formula) -> Viewport {
         if formula.julia { return Viewport(center: PlanePoint(0, 0), log2Radius: log2(1.5)) }
         switch formula.family {
@@ -86,6 +86,7 @@ public struct Viewport: @unchecked Sendable {
     /// Magnification relative to a view of radius 2.
     public var zoomLog10: Double { (1 - log2Radius) * log10(2.0) }
 
+    /// Magnification for display: "123.4×" or "1.23e45".
     public var zoomText: String {
         let l = zoomLog10
         if l < 4 { return String(format: "%.1f×", pow(10, l)) }
@@ -113,11 +114,14 @@ public func scientific(log10 l: Double, digits: Int) -> (mantissa: Double, expon
 /// Iteration limits and precision/speed trade-offs.
 public struct IterationSettings: Codable, Sendable, Hashable {
     public var maxIter: Int = 1500
+    /// Lets the renderer adapt `maxIter` to the view.
     public var autoIterations = true
+    /// Escape radius.
     public var bailout: Double = 256
     /// log2 of the relative error tolerated by bilinear approximation.
     public var blaLog2Eps: Double = -24
     public var useBLA = true
+    /// Tracks the derivative, for distance estimates and relief lighting.
     public var derivative = true
 
     public init() {}
@@ -125,15 +129,21 @@ public struct IterationSettings: Codable, Sendable, Hashable {
 
 /// How iteration data becomes colour.
 public struct ColorSettings: Codable, Sendable, Hashable {
+    /// Index into `Palette.all`.
     public var palette = 0
+    /// Palette cycles per unit of mapped escape time.
     public var density: Double = 0.42
+    /// Palette phase, 0 to 1.
     public var offset: Double = 0.0
-    /// 0 linear, 1 square root, 2 logarithmic, 3 distance to the set.
+    /// How escape time maps to the palette: 0 linear, 1 square root, 2 logarithmic, 3 distance to the set.
     public var mapping = 2
+    /// Relief lighting from the distance estimate; the light's direction is in radians.
     public var lightStrength: Double = 0.75
     public var lightAzimuth: Double = 2.3
     public var lightElevation: Double = 0.75
+    /// Darkening towards the set's boundary.
     public var edgeStrength: Double = 0.35
+    /// Linear colour of the set itself.
     public var interior = SIMD3<Float>(0.004, 0.004, 0.008)
 
     public init() {}

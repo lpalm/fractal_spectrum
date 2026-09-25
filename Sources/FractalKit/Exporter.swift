@@ -9,7 +9,6 @@ import CFractal
 /// reference orbits never disturb the interactive view.
 public final class Exporter: @unchecked Sendable {
     public let engine = Engine()
-    private let gpu = GPU.shared
 
     public init() {}
 
@@ -35,12 +34,10 @@ public final class Exporter: @unchecked Sendable {
 
     /// Renders and writes a PNG. `progress` returns false to cancel.
     public func exportImage(_ job: ImageJob, to url: URL, progress: @escaping (Double) -> Bool) throws {
-        guard let image = engine.renderStill(scene: job.scene, color: job.color,
-                                             options: .init(width: job.width, height: job.height, samples: job.samples,
-                                                            tile: 2048, colorOrigin: job.colorOrigin),
-                                             progress: progress) else {
-            throw CocoaError(.userCancelled)
-        }
+        let options = Engine.StillOptions(width: job.width, height: job.height, samples: job.samples,
+                                          colorOrigin: job.colorOrigin)
+        guard let image = engine.renderStill(scene: job.scene, color: job.color, options: options, progress: progress)
+        else { throw CocoaError(.userCancelled) }
         try Engine.writePNG(image, to: url)
     }
 
@@ -89,21 +86,20 @@ public final class Exporter: @unchecked Sendable {
         /// Zoom path: log radius moves at constant speed with eased ends; the target glides to the
         /// centre faster than the view shrinks, so it ends dead centre.
         public func view(at t: Double) -> Viewport {
-            let e = 0.08
-            let tt = min(max(t, 0), 1)
-            // trapezoidal speed profile, integrated and normalised
-            func pos(_ x: Double) -> Double {
-                if x < e { return x * x / (2 * e) }
-                if x > 1 - e { let y = 1 - x; return 1 - e - y * y / (2 * e) }
-                return x - e / 2
+            let easing = 0.08
+            // trapezoidal speed profile, integrated
+            func position(_ x: Double) -> Double {
+                if x < easing { return x * x / (2 * easing) }
+                if x > 1 - easing { let y = 1 - x; return 1 - easing - y * y / (2 * easing) }
+                return x - easing / 2
             }
-            let u = pos(tt) / pos(1)
+            let clamped = min(max(t, 0), 1)
+            let u = position(clamped) / position(1)
             var v = target
             v.log2Radius = start.log2Radius + (target.log2Radius - start.log2Radius) * u
             let k = pow(exp2(v.log2Radius - start.log2Radius), 1.6)
-            let off = start.center.minus(target.center) * k
-            v.center = target.center.offset(by: off, precision: target.center.precision)
-            v.rotation = start.rotation + (target.rotation - start.rotation) * u + spin * .pi / 180 * tt
+            v.center = target.center.offset(by: start.center.minus(target.center) * k, precision: target.center.precision)
+            v.rotation = start.rotation + (target.rotation - start.rotation) * u + spin * .pi / 180 * clamped
             return v
         }
     }
@@ -111,13 +107,70 @@ public final class Exporter: @unchecked Sendable {
     /// Renders a zoom video. `progress(fraction, previewImage)` returns false to cancel.
     public func exportVideo(_ job: VideoJob, to url: URL,
                             progress: @escaping (Double, CGImage?) -> Bool) throws {
+        let movie = try MovieWriter(url: url, job: job)
+        let frames = job.frameCount
+        var iter = IterationSettings()
+        iter.maxIter = 1000
+        let renderer = FrameRenderer(engine: engine, width: job.width, height: job.height)
+        engine.colorOrigin = nil
+        // One reference at the target serves every frame (they all contain it).
+        _ = engine.references.reference(formula: job.formula, view: job.target, minSide: Double(min(job.width, job.height)),
+                                        length: 1024, blocking: true)
+        var previousView: Viewport?
+        for frame in 0..<frames {
+            let t = frames > 1 ? Double(frame) / Double(frames - 1) : 1
+            let view = job.view(at: t)
+            var color = job.color
+            color.offset = (color.offset + job.colorCycle * Double(frame) / Double(job.fps)).truncatingRemainder(dividingBy: 1)
+            let (pixelBuffer, texture) = try movie.nextFrame()
+            // as in a live flight, colours settle faster towards the end, so the video arrives at the
+            // colours its last view has on screen
+            let zoomed = previousView.map { (view.log2Radius - $0.log2Radius) * (t > 0.8 ? 4 : 1) }
+            let (stats, gpuMs) = renderer.render(scene: FractalScene(formula: job.formula, view: view, iter: iter),
+                                                 color: color, samples: job.samples, into: texture, zoomed: zoomed)
+            previousView = view
+            // iterations only ever grow during a zoom-in, so colours never jump back
+            let proposal = IterationTuner.adjustOffline(maxIter: iter.maxIter, stats: stats, samples: job.width * job.height,
+                                                        gpuMs: gpuMs, passes: job.samples)
+            iter.maxIter = max(iter.maxIter, proposal)
+            movie.append(pixelBuffer, frame: frame)
+            let preview = frame % 10 == 0 ? Exporter.image(from: pixelBuffer) : nil
+            if !progress(Double(frame + 1) / Double(frames), preview) {
+                movie.cancel()
+                throw CocoaError(.userCancelled)
+            }
+        }
+        try movie.finish()
+    }
+
+    /// The pixels of a BGRA pixel buffer as an image (for previews).
+    static func image(from pixelBuffer: CVPixelBuffer) -> CGImage? {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(pixelBuffer),
+              let context = CGContext(data: base, width: CVPixelBufferGetWidth(pixelBuffer),
+                                      height: CVPixelBufferGetHeight(pixelBuffer), bitsPerComponent: 8,
+                                      bytesPerRow: CVPixelBufferGetBytesPerRow(pixelBuffer),
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+        else { return nil }
+        return context.makeImage()
+    }
+}
+
+/// Writes the frames of a zoom video, handing out Metal-backed pixel buffers to render into.
+private final class MovieWriter {
+    private let writer: AVAssetWriter
+    private let input: AVAssetWriterInput
+    private let adaptor: AVAssetWriterInputPixelBufferAdaptor
+    private let textureCache: CVMetalTextureCache
+    private let job: Exporter.VideoJob
+
+    init(url: URL, job: Exporter.VideoJob) throws {
+        self.job = job
         try? FileManager.default.removeItem(at: url)
-        let fileType: AVFileType = job.codec == .prores ? .mov : .mp4
-        let writer = try AVAssetWriter(outputURL: url, fileType: fileType)
-        var settings: [String: Any] = [
-            AVVideoWidthKey: job.width,
-            AVVideoHeightKey: job.height,
-        ]
+        writer = try AVAssetWriter(outputURL: url, fileType: job.codec == .prores ? .mov : .mp4)
+        var settings: [String: Any] = [AVVideoWidthKey: job.width, AVVideoHeightKey: job.height]
         switch job.codec {
         case .hevc:
             let bitsPerPixel = 0.35
@@ -130,9 +183,9 @@ public final class Exporter: @unchecked Sendable {
         case .prores:
             settings[AVVideoCodecKey] = AVVideoCodecType.proRes422HQ
         }
-        let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
+        input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
         input.expectsMediaDataInRealTime = false
-        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+        adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
             kCVPixelBufferWidthKey as String: job.width,
             kCVPixelBufferHeightKey as String: job.height,
@@ -142,75 +195,42 @@ public final class Exporter: @unchecked Sendable {
         writer.add(input)
         guard writer.startWriting() else { throw writer.error ?? CocoaError(.fileWriteUnknown) }
         writer.startSession(atSourceTime: .zero)
-
         var cache: CVMetalTextureCache?
-        CVMetalTextureCacheCreate(nil, nil, gpu.device, nil, &cache)
+        CVMetalTextureCacheCreate(nil, nil, GPU.shared.device, nil, &cache)
         guard let cache else { throw CocoaError(.fileWriteUnknown) }
+        textureCache = cache
+    }
 
-        let frames = job.frameCount
-        var iter = IterationSettings()
-        iter.maxIter = 1000
-        let renderer = FrameRenderer(engine: engine, width: job.width, height: job.height)
-        engine.colorOrigin = nil
-        // One reference at the target serves every frame (they all contain it).
-        _ = engine.references.reference(formula: job.formula, view: job.target, minSide: Double(min(job.width, job.height)),
-                                        length: 1024, blocking: true)
-        var previousView: Viewport?
-        for f in 0..<frames {
-            let t = frames > 1 ? Double(f) / Double(frames - 1) : 1
-            let view = job.view(at: t)
-            let scene = FractalScene(formula: job.formula, view: view, iter: iter)
-            var color = job.color
-            color.offset = (color.offset + job.colorCycle * Double(f) / Double(job.fps)).truncatingRemainder(dividingBy: 1)
-            guard let pool = adaptor.pixelBufferPool else { throw writer.error ?? CocoaError(.fileWriteUnknown) }
-            var pb: CVPixelBuffer?
-            CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pb)
-            guard let pixelBuffer = pb else { throw CocoaError(.fileWriteUnknown) }
-            var cvTex: CVMetalTexture?
-            CVMetalTextureCacheCreateTextureFromImage(nil, cache, pixelBuffer, nil, .bgra8Unorm, job.width, job.height, 0, &cvTex)
-            guard let cvTex, let texture = CVMetalTextureGetTexture(cvTex) else { throw CocoaError(.fileWriteUnknown) }
+    /// A pixel buffer for the next frame and a texture of it to render into.
+    func nextFrame() throws -> (CVPixelBuffer, MTLTexture) {
+        guard let pool = adaptor.pixelBufferPool else { throw writer.error ?? CocoaError(.fileWriteUnknown) }
+        var pixelBuffer: CVPixelBuffer?
+        CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pixelBuffer)
+        guard let pixelBuffer else { throw CocoaError(.fileWriteUnknown) }
+        var cvTexture: CVMetalTexture?
+        CVMetalTextureCacheCreateTextureFromImage(nil, textureCache, pixelBuffer, nil, .bgra8Unorm, job.width, job.height,
+                                                  0, &cvTexture)
+        guard let cvTexture, let texture = CVMetalTextureGetTexture(cvTexture) else { throw CocoaError(.fileWriteUnknown) }
+        return (pixelBuffer, texture)
+    }
 
-            // as in a live flight, colours settle faster towards the end, so the video arrives at the
-            // colours its last view has on screen
-            let zoomed = previousView.map { (view.log2Radius - $0.log2Radius) * (t > 0.8 ? 4 : 1) }
-            let (stats, ms) = renderer.render(scene: scene, color: color, samples: job.samples, into: texture,
-                                              zoomed: zoomed)
-            previousView = view
-            // iterations only ever grow during a zoom-in, so colours never jump back
-            let pixels = job.width * job.height
-            let next = IterationTuner.adjust(maxIter: iter.maxIter, stats: stats, samples: pixels)
-            if next > iter.maxIter, IterationTuner.grownCost(ms, stats: stats, samples: pixels, maxIter: iter.maxIter, next: next)
-                * 1000 / Double(pixels * max(job.samples, 1)) <= IterationTuner.offlineMicrosPerSample {
-                iter.maxIter = next
-            }
+    /// Appends a rendered frame, waiting for the encoder to take it.
+    func append(_ pixelBuffer: CVPixelBuffer, frame: Int) {
+        while !input.isReadyForMoreMediaData { Thread.sleep(forTimeInterval: 0.002) }
+        adaptor.append(pixelBuffer, withPresentationTime: CMTime(value: CMTimeValue(frame), timescale: CMTimeScale(job.fps)))
+    }
 
-            while !input.isReadyForMoreMediaData { Thread.sleep(forTimeInterval: 0.002) }
-            adaptor.append(pixelBuffer, withPresentationTime: CMTime(value: CMTimeValue(f), timescale: CMTimeScale(job.fps)))
-            let preview = f % 10 == 0 ? Exporter.image(from: pixelBuffer) : nil
-            if !progress(Double(f + 1) / Double(frames), preview) {
-                input.markAsFinished()
-                writer.cancelWriting()
-                throw CocoaError(.userCancelled)
-            }
-        }
+    func cancel() {
+        input.markAsFinished()
+        writer.cancelWriting()
+    }
+
+    func finish() throws {
         input.markAsFinished()
         let done = DispatchSemaphore(value: 0)
         writer.finishWriting { done.signal() }
         done.wait()
         if writer.status != .completed { throw writer.error ?? CocoaError(.fileWriteUnknown) }
-    }
-
-    static func image(from pb: CVPixelBuffer) -> CGImage? {
-        CVPixelBufferLockBaseAddress(pb, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddress(pb) else { return nil }
-        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb), bpr = CVPixelBufferGetBytesPerRow(pb)
-        guard let ctx = CGContext(data: base, width: w, height: h, bitsPerComponent: 8, bytesPerRow: bpr,
-                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                  bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else {
-            return nil
-        }
-        return ctx.makeImage()
     }
 }
 
@@ -220,40 +240,43 @@ public final class FrameRenderer {
     let engine: Engine
     public let width: Int
     public let height: Int
-    private let g: MTLBuffer
-    private let acc: MTLTexture
+    private let gBuffer: MTLBuffer
+    private let accumulator: MTLTexture
     private let paced: PacedEncoder
 
     public init(engine: Engine, width: Int, height: Int) {
         self.engine = engine
         self.width = width
         self.height = height
-        g = engine.makeGBuffer(samples: width * height)
-        acc = engine.makeAccumulator(width: width, height: height)
+        gBuffer = engine.makeGBuffer(samples: width * height)
+        accumulator = engine.makeAccumulator(width: width, height: height)
         paced = PacedEncoder(queue: engine.queue)
     }
 
     /// Renders one frame; `zoomed` is the zoom since the previous frame in doublings (nil for a first
     /// frame). Returns the escape statistics of the first sample and the GPU time taken.
     @discardableResult
-    public func render(scene: FractalScene, color: ColorSettings, samples: Int, into dst: MTLTexture,
-                zoomed: Double?) -> (stats: FSStats, gpuMs: Double) {
+    public func render(scene: FractalScene, color: ColorSettings, samples: Int, into target: MTLTexture,
+                       zoomed: Double?) -> (stats: FSStats, gpuMs: Double) {
         let startMs = paced.gpuMs
         let size = SIMD2(UInt32(width), UInt32(height))
+        let region = Engine.GBufferRegion(buffer: gBuffer, size: size)
         var firstSlot: UInt32 = 0
-        for s in 0..<max(samples, 1) {
+        for sample in 0..<max(samples, 1) {
             let slot = engine.nextStatsSlot()
-            if s == 0 { firstSlot = slot }
-            guard let plan = engine.makePlan(scene: scene, grid: .init(width: width, height: height, jitter: Engine.jitter(s)),
-                                             enc: paced.enc, blocking: true, statsSlot: slot) else { break }
-            engine.encodeStatsReset(paced.enc, slot: slot)
-            paced.iterate(engine, plan: plan, gbuf: g, origin: .zero, size: SIMD2(width, height),
-                          bufOrigin: .zero, bufStride: UInt32(width))
-            if s == 0 { engine.encodeColorOrigin(paced.enc, slot: slot, zoomed: zoomed) }
-            engine.encodeColorize(paced.enc, acc: acc, primary: .init(buffer: g, size: size), fallback: nil, color: color,
-                                  accumulate: s > 0, outSize: size)
-            if s == samples - 1 || samples <= 1 {
-                engine.encodePresent(paced.enc, acc: acc, dst: dst, srcSize: size, background: color.interior, size: size)
+            if sample == 0 { firstSlot = slot }
+            let grid = Engine.Grid(width: width, height: height, jitter: Engine.jitter(sample))
+            guard let plan = engine.makePlan(scene: scene, grid: grid, encoder: paced.encoder, blocking: true,
+                                             statsSlot: slot) else { break }
+            engine.encodeStatsReset(paced.encoder, slot: slot)
+            paced.iterate(engine, plan: plan, into: gBuffer, origin: .zero, size: SIMD2(width, height),
+                          bufferOrigin: .zero, bufferStride: UInt32(width))
+            if sample == 0 { engine.encodeColorOrigin(paced.encoder, slot: slot, zoomed: zoomed) }
+            engine.encodeColorize(paced.encoder, into: accumulator, from: region, fallback: nil, color: color,
+                                  accumulate: sample > 0, size: size)
+            if sample == samples - 1 || samples <= 1 {
+                engine.encodePresent(paced.encoder, from: accumulator, into: target, sourceSize: size,
+                                     background: color.interior, size: size)
             }
         }
         paced.sync()
