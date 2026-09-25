@@ -759,6 +759,7 @@ struct HelpOverlay: View {
         ("M", "Find a mini-Mandelbrot in view"),
         ("F", "Full screen"),
         ("Space", "Hide interface"),
+        ("? / Esc", "Show / hide these shortcuts"),
         ("⇧⌘C / ⌘L", "Copy / go to coordinates"),
         ("⌥⌘C", "Copy image"),
         ("⌘R", "Record the view to a movie"),

@@ -32,6 +32,7 @@ swift build -c release --product fscli
 | Hold ⌥ / ⌥-click | Preview / open the Julia set of the point under the pointer |
 | Hold ⇧ | Orbit of the point under the pointer |
 | T | Guided tour |
+| J | Julia set of the view centre / back to the parameter plane |
 | P | Autopilot: endless dive along intricate boundary detail, stopping at minibrots on the way (, / . for speed) |
 | M | Find the nearest mini-Mandelbrot in view and fly to it |
 | B | Save the view to Your Places |
@@ -40,6 +41,8 @@ swift build -c release --product fscli
 | [ / ] | Halve / double iterations |
 | L | Relief lighting |
 | Space | Hide the interface |
+| F | Full screen |
+| ? | Shortcuts |
 | ⌘S / ⌘E | Export image / zoom video |
 | ⌘[ / ⌘] | Back / forward through visited views |
 | ⇧⌘C / ⌘L | Copy / go to coordinates |

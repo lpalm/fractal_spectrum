@@ -211,6 +211,9 @@ final class FractalMTKView: MTKView {
         case 124: model.camera.fling(velocity: SIMD2(-panStep * 6, 0))     // right
         case 125: model.camera.fling(velocity: SIMD2(0, -panStep * 6))     // down
         case 126: model.camera.fling(velocity: SIMD2(0, panStep * 6))      // up
+        case 53:                                                           // escape
+            if model.showHelp { model.showHelp = false } else { super.keyDown(with: e) }
+            return
         default:
             switch e.charactersIgnoringModifiers?.lowercased() {
             case "=", "+": model.camera.zoom(log2Factor: -1, at: c, width: w, height: h, animated: true)
@@ -243,6 +246,9 @@ final class FractalMTKView: MTKView {
                 return
             case "t":
                 if model.touring { model.stopTour() } else { model.startTour() }
+                return
+            case "?", "/":
+                model.showHelp.toggle()
                 return
             default: super.keyDown(with: e)
             }
