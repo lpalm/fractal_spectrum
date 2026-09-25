@@ -144,9 +144,13 @@ public final class ReferenceStore: @unchecked Sendable {
 
     /// Returns a reference usable for `view`, starting background work when a better one is needed.
     /// With `blocking`, waits until an ideal reference is complete.
-    func reference(formula: Formula, view: Viewport, minSide: Double, length: Int, focus: PlanePoint? = nil,
+    func reference(formula: Formula, view: Viewport, minSide: Double, length: Int, focus: Focus? = nil,
                    blocking: Bool) -> ReferenceOrbit? {
         let need = view.requiredPrecision(minSide: minSide)
+        // A new orbit anchored at the focus gets the precision of the destination, so it serves the whole motion.
+        var focusView = view
+        if let f = focus { focusView.log2Radius = min(f.log2Radius, view.log2Radius) }
+        let newPrecision = max(need, focusView.requiredPrecision(minSide: minSide)) + 64
         lock.lock()
         if let p = pending, !p.isComputing, p.covers(length) || p.snapshot.escaped {
             if suits(p, formula, view, need: need, slack: 10) {
@@ -164,8 +168,8 @@ public final class ReferenceStore: @unchecked Sendable {
                 if !p.covers(length) && !p.isComputing { start = p }
             } else {
                 pending?.cancel()
-                let anchor = focus ?? view.center
-                let ref = ReferenceOrbit(formula: formula, center: anchor, precision: need + 64, capacity: length + 1)
+                let anchor = focus?.point ?? view.center
+                let ref = ReferenceOrbit(formula: formula, center: anchor, precision: newPrecision, capacity: length + 1)
                 pending = ref
                 start = ref
             }

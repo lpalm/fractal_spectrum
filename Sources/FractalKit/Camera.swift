@@ -159,6 +159,12 @@ public struct Flight: @unchecked Sendable {
     }
 }
 
+/// Destination of the current camera motion.
+public struct Focus: @unchecked Sendable {
+    public var point: PlanePoint
+    public var log2Radius: Double
+}
+
 /// Interactive camera: animated zoom around an anchor, drag panning with inertia, rotation and flights.
 public final class Camera: @unchecked Sendable {
     public private(set) var view: Viewport { didSet { version &+= 1 } }
@@ -184,12 +190,13 @@ public final class Camera: @unchecked Sendable {
         flight != nil || abs(zoomRemaining) > 1e-4 || simd_length(velocity) > 2 || abs(rotationRemaining) > 1e-4
     }
 
-    /// Plane point the camera is heading towards (a good place for a new reference orbit).
-    public func focus(width: Int, height: Int) -> PlanePoint? {
-        if let f = flight { return f.end.center }
+    /// Where the camera is heading and how deep: a good place (and precision) for a new reference orbit.
+    public func focus(width: Int, height: Int) -> Focus? {
+        if let f = flight { return Focus(point: f.end.center, log2Radius: f.end.log2Radius) }
         // Zooming in keeps the anchor at a fixed screen offset, so a reference there stays in view.
         if let a = anchorPixel, zoomRemaining < -0.05 {
-            return view.point(atPixel: a, width: width, height: height, flipY: flipY)
+            return Focus(point: view.point(atPixel: a, width: width, height: height, flipY: flipY),
+                         log2Radius: view.log2Radius + zoomRemaining)
         }
         return nil
     }

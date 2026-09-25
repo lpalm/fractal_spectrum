@@ -47,6 +47,11 @@ long fs_ref_run(FSRefJob *job, long target, fs_float2 *zf, FSRefExt *zx, double 
 long fs_ref_count(const FSRefJob *job);
 int fs_ref_escaped(const FSRefJob *job);
 
+// ---- Minibrot location (quadratic Mandelbrot) ----
+long fs_find_period(const FSHP *cre, const FSHP *cim, double log2r, long maxPeriod);
+long fs_find_nucleus(const FSHP *cre, const FSHP *cim, long period, long maxSteps, FSHP *outRe, FSHP *outIm);
+double fs_nucleus_log2size(const FSHP *cre, const FSHP *cim, long period);
+
 // ---- CPU oracle for verification ----
 // Iterates one pixel at full precision; returns the escape iteration or maxIter.
 long fs_oracle_pixel(int formula, int power, const FSHP *cre, const FSHP *cim, long maxIter, double bailout2,

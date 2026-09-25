@@ -70,7 +70,7 @@ public final class Engine: @unchecked Sendable {
     /// Prepares a pass; returns nil while a needed reference orbit is still being computed.
     /// Encodes BLA table construction into `enc` when the table must be (re)built.
     public func makePlan(scene: FractalScene, grid: Grid, enc: MTLComputeCommandEncoder, blocking: Bool,
-                         focus: PlanePoint? = nil, statsSlot: UInt32) -> Plan? {
+                         focus: Focus? = nil, statsSlot: UInt32) -> Plan? {
         let f = scene.formula
         let v = scene.view
         let minSide = Double(min(grid.width, grid.height))

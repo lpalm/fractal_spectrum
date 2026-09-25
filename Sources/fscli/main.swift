@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import CoreGraphics
 import FractalKit
 
 func import_frames() {
@@ -217,6 +218,57 @@ case "video":
 case "frames":
     // Extracts frames at the given fractions of a video as PNGs.
     import_frames()
+
+case "compare":
+    // Side-by-side iteration images: GPU (left) and full-precision CPU (right), log-scaled greyscale.
+    var scene = makeScene()
+    scene.iter.autoIterations = false
+    let (w, h) = (args.int("w", 160), args.int("h", 100))
+    guard let map = engine.iterationMap(scene: scene, width: w, height: h) else { exit(1) }
+    var cpu = [Int](repeating: 0, count: w * h)
+    DispatchQueue.concurrentPerform(iterations: h) { y in
+        for x in 0..<w {
+            let p = Engine.samplePoint(scene: scene, width: w, height: h, x: x, y: y)
+            cpu[y * w + x] = Engine.oracle(formula: scene.formula, point: p, maxIter: map.plan.effectiveMaxIter,
+                                           bailout: scene.iter.bailout).n
+        }
+    }
+    let maxI = Double(map.plan.effectiveMaxIter)
+    var px = [UInt8](repeating: 255, count: w * 2 * h * 4)
+    func put(_ x: Int, _ y: Int, _ n: Double) {
+        let v = n >= maxI ? 0 : UInt8(max(0, min(255, 40 + 215 * log(1 + n) / log(1 + maxI))))
+        let i = (y * w * 2 + x) * 4
+        px[i] = v; px[i + 1] = v; px[i + 2] = v
+    }
+    for y in 0..<h {
+        for x in 0..<w {
+            let g = map.n[y * w + x]
+            put(x, y, g == 0xFFFF_FFFF ? maxI : Double(g))
+            put(x + w, y, Double(cpu[y * w + x]))
+        }
+    }
+    let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+    let ctx = CGContext(data: &px, width: w * 2, height: h, bitsPerComponent: 8, bytesPerRow: w * 8, space: cs,
+                        bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+    try Engine.writePNG(ctx.makeImage()!, to: URL(fileURLWithPath: args.string("out", "compare.png")))
+    print("wrote compare image")
+
+case "minibrot":
+    // Finds the lowest-period minibrot in the view and prints its location, size and suggested views.
+    let scene = makeScene()
+    let v = scene.view
+    let t0 = Date()
+    let p = Minibrot.period(center: v.center, log2Radius: v.log2Radius, maxPeriod: args.int("maxperiod", 2_000_000))
+    guard p > 0 else { print("no period found"); exit(1) }
+    let prec = max(v.center.precision, Int(-v.log2Radius) * 2 + 128)
+    guard let n = Minibrot.nucleus(near: v.center, period: p, precision: prec) else { print("newton failed"); exit(1) }
+    let ls = Minibrot.log2Size(nucleus: n, period: p)
+    let dist = n.minus(v.center).log2Abs - v.log2Radius
+    let digits = Int(-ls * 0.30103) + 12
+    print(String(format: "period %d, size 2^%.1f (1e%.1f), offset %.2f radii, %.2fs", p, ls, ls * 0.30103, exp2(dist), Date().timeIntervalSince(t0)))
+    print("--re \(n.re.string(digits: digits)) --im \(n.im.string(digits: digits))")
+    let zMini = (1 - (ls + log2(3.0))) * log10(2.0)
+    print(String(format: "minibrot view --zoom %.2f ; embedded julia --zoom %.2f", zMini, (1 - (ls + v.log2Radius) / 2) * log10(2.0)))
 
 case "flighttest":
     let a = Viewport.home(for: Formula())
