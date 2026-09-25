@@ -21,7 +21,7 @@ struct Location: Identifiable, Hashable, Codable {
     var viewport: Viewport? {
         let bits = max(64, Int(zoom * 3.33) + 96)   // a little over log2(10) bits per digit
         guard let center = PlanePoint(re: re, im: im, precision: bits) else { return nil }
-        return Viewport(center: center, log2Radius: 1 - zoom / log10(2.0), rotation: rotation * .pi / 180)
+        return Viewport(center: center, log2Radius: Viewport.log2Radius(zoomLog10: zoom), rotation: rotation * .pi / 180)
     }
 
     /// Magnification for a tile's badge: "40×" or "10³⁰".

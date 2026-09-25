@@ -162,7 +162,7 @@ final class ExportController {
     func exportImage(model: AppModel, to destination: URL? = nil) {
         let url = destination ?? ExportController.newFile(in: imageFolder, extension: "png")
         var iteration = model.iteration
-        iteration.maxIter = max(iteration.maxIter, 1000)
+        iteration.maxIter = max(iteration.maxIter, IterationTuner.lowestLimit)
         let job = Exporter.ImageJob(scene: FractalScene(formula: model.formula, view: model.camera.view, iteration: iteration),
                                     color: model.color, width: imageSize.width, height: imageSize.height,
                                     samples: imageSamples, colorOrigin: model.engine.colorOrigin)

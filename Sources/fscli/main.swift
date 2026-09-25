@@ -299,10 +299,11 @@ func flightTest() {
     let flight = Flight(from: start, to: end)
     print(String(format: "path %.1f duration %.1fs", flight.pathLength, flight.duration))
     for t in [0.0, 0.001, 0.1, 0.3, 0.5, 0.7, 0.9, 0.999, 1.0] {
-        let v = flight.view(at: t)
-        let fromEnd = v.center.minus(end.center).log2Abs - v.log2Radius
-        let fromStart = v.center.minus(start.center).log2Abs - v.log2Radius
-        print(String(format: "t %.3f  zoom 1e%.2f  log2(|c-end|/r) %.2f  log2(|c-start|/r) %.2f", t, v.zoomLog10, fromEnd, fromStart))
+        let view = flight.view(at: t)
+        let fromEnd = view.center.minus(end.center).log2Abs - view.log2Radius
+        let fromStart = view.center.minus(start.center).log2Abs - view.log2Radius
+        print(String(format: "t %.3f  zoom 1e%.2f  log2(|c-end|/r) %.2f  log2(|c-start|/r) %.2f", t, view.zoomLog10,
+                     fromEnd, fromStart))
     }
 }
 
