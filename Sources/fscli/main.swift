@@ -286,5 +286,5 @@ case "flighttest":
     }
 
 default:
-    print("usage: fscli render|verify|bench [--formula f] [--re x --im y] [--zoom log10] [--iter n] [--size WxH]")
+    print("usage: fscli render|verify|bench|dive|stats|video|frames|compare|minibrot|flighttest [--formula f] [--re x --im y] [--zoom log10] [--iter n] [--size WxH]")
 }
