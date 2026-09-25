@@ -94,7 +94,7 @@ public final class GPU: @unchecked Sendable {
     /// Compiles the pipelines an interactive session needs first, off the main thread.
     public func prewarm() {
         DispatchQueue.global(qos: .userInitiated).async {
-            for name in ["colorize", "present", "stats_reset", "stats_smooth"] { _ = self.pipeline(name) }
+            for name in ["colorize", "present", "stats_reset", "color_origin"] { _ = self.pipeline(name) }
             for der in [true, false] {
                 _ = self.pipeline(PipelineKey(name: "iterate_direct", withDer: der))
                 for deep in [false, true] {

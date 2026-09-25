@@ -186,6 +186,8 @@ public final class Camera: @unchecked Sendable {
 
     public var isFlying: Bool { flight != nil }
     public var flightTarget: Viewport? { flight?.end }
+    /// How far the current flight has come, from 0 to 1; nil when not flying.
+    public var flightProgress: Double? { flight.map { min(flightTime / $0.duration, 1) } }
     public var isAnimating: Bool {
         flight != nil || abs(zoomRemaining) > 1e-4 || simd_length(velocity) > 2 || abs(rotationRemaining) > 1e-4
     }

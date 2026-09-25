@@ -94,7 +94,7 @@ final class ExportController {
         iter.maxIter = max(iter.maxIter, 1000)
         let job = Exporter.ImageJob(scene: FractalScene(formula: model.formula, view: model.camera.view, iter: iter),
                                     color: model.color, width: imageSize.width, height: imageSize.height,
-                                    samples: imageSamples)
+                                    samples: imageSamples, colorOrigin: model.engine.colorOrigin)
         begin("Rendering \(imageSize.width)×\(imageSize.height)")
         let token = cancelToken
         Task.detached(priority: .userInitiated) { [weak self] in
@@ -116,7 +116,7 @@ final class ExportController {
                                                              ext: codec == .prores ? "mov" : "mp4",
                                                              in: .moviesDirectory) else { return }
         let job = Exporter.VideoJob(formula: model.formula, target: model.camera.view,
-                                    start: Viewport.home(for: model.formula), color: model.color, colorStats: nil,
+                                    start: Viewport.home(for: model.formula), color: model.color,
                                     width: videoSize.width, height: videoSize.height, fps: fps, duration: duration,
                                     samples: videoSamples, codec: codec, spin: spin, colorCycle: cycleColors ? 0.05 : 0)
         begin("Rendering \(job.frameCount) frames")

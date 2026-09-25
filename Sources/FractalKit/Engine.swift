@@ -13,8 +13,8 @@ public final class Engine: @unchecked Sendable {
     public let palettes: PaletteBank
     public let references = ReferenceStore()
     let stats: MTLBuffer
-    /// Smoothed colour-normalisation statistics (float4: low iteration, span, -, valid).
-    public let smooth: MTLBuffer
+    /// Colour origin: the escape time at the start of the palette (float4: origin, -, -, set).
+    let colorOriginBuffer: MTLBuffer
     private let dummy: MTLBuffer
     private let dummyTexture: MTLTexture
     private var slot: UInt32 = 0
@@ -25,8 +25,8 @@ public final class Engine: @unchecked Sendable {
         palettes = PaletteBank(device: device)
         stats = device.makeBuffer(length: 256 * MemoryLayout<FSStats>.stride, options: .storageModeShared)!
         assert(MemoryLayout<FSStats>.stride == 32)
-        smooth = device.makeBuffer(length: 16, options: .storageModeShared)!
-        memset(smooth.contents(), 0, 16)
+        colorOriginBuffer = device.makeBuffer(length: 16, options: .storageModeShared)!
+        memset(colorOriginBuffer.contents(), 0, 16)
         dummy = device.makeBuffer(length: 256, options: .storageModePrivate)!
         let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: 1, height: 1, mipmapped: false)
         td.usage = [.shaderRead]
@@ -227,26 +227,34 @@ public final class Engine: @unchecked Sendable {
         gpu.dispatch1D(enc, gpu.pipeline("stats_reset"), count: 1)
     }
 
-    /// Folds a finished pass's statistics into the colour normalisation; alpha 1 snaps.
-    public func encodeStatsSmooth(_ enc: MTLComputeCommandEncoder, slot: UInt32, alpha: Float) {
-        var args = SIMD2<Float>(Float(slot), alpha)
+    /// Octaves of escape time a view keeps above the colour origin (see the `color_origin` kernel).
+    static let colorSpan: Float = 8
+    /// Zoom, in doublings, over which the colour origin covers most of the way to a new target.
+    static let colorOriginDoublings = 3.0
+
+    /// Moves the colour origin towards what a finished pass's statistics call for, in proportion to
+    /// the zoom since the last update (`zoomed`, in doublings); nil snaps to the pass (a new view).
+    public func encodeColorOrigin(_ enc: MTLComputeCommandEncoder, slot: UInt32, zoomed: Double?) {
+        let rate = zoomed.map { Float(1 - exp(-abs($0) / Engine.colorOriginDoublings)) } ?? 1
+        var args = SIMD3<Float>(Float(slot), rate, Engine.colorSpan)
         enc.setBuffer(stats, offset: 0, index: 7)
-        enc.setBuffer(smooth, offset: 0, index: 0)
-        enc.setBytes(&args, length: 8, index: 1)
-        gpu.dispatch1D(enc, gpu.pipeline("stats_smooth"), count: 1)
+        enc.setBuffer(colorOriginBuffer, offset: 0, index: 0)
+        enc.setBytes(&args, length: MemoryLayout<SIMD3<Float>>.stride, index: 1)
+        gpu.dispatch1D(enc, gpu.pipeline("color_origin"), count: 1)
     }
 
     public static var traceTuning = false
 
-    public func resetSmoothing() {
-        memset(smooth.contents(), 0, 16)
-    }
-
-    /// Current colour normalisation (low iteration, span, -, valid).
-    public var colorStats: SIMD4<Float> { smooth.contents().assumingMemoryBound(to: SIMD4<Float>.self).pointee }
-
-    public func setColorStats(_ s: SIMD4<Float>) {
-        smooth.contents().assumingMemoryBound(to: SIMD4<Float>.self).pointee = s
+    /// The escape time at the start of the palette; nil until a pass has set it (the next one snaps).
+    public var colorOrigin: Float? {
+        get {
+            let o = colorOriginBuffer.contents().assumingMemoryBound(to: SIMD4<Float>.self).pointee
+            return o.w == 0 ? nil : o.x
+        }
+        set {
+            colorOriginBuffer.contents().assumingMemoryBound(to: SIMD4<Float>.self).pointee =
+                newValue.map { SIMD4($0, 0, 0, 1) } ?? .zero
+        }
     }
 
     /// Source G-buffer for colouring.
@@ -337,7 +345,7 @@ public final class Engine: @unchecked Sendable {
         enc.setBuffer(primary.buffer, offset: 0, index: 0)
         enc.setBuffer(fallback?.done ?? dummy, offset: 0, index: 2)
         enc.setBytes(&c, length: MemoryLayout<FSColorParams>.stride, index: 3)
-        enc.setBuffer(smooth, offset: 0, index: 4)
+        enc.setBuffer(colorOriginBuffer, offset: 0, index: 4)
         gpu.dispatch2D(enc, gpu.pipeline("colorize"), width: Int(out.x), height: Int(out.y))
     }
 
@@ -349,7 +357,7 @@ public final class Engine: @unchecked Sendable {
         enc.setTexture(palettes.texture, index: 1)
         enc.setBuffer(source.buffer, offset: 0, index: 0)
         enc.setBytes(&c, length: MemoryLayout<FSColorParams>.stride, index: 3)
-        enc.setBuffer(smooth, offset: 0, index: 4)
+        enc.setBuffer(colorOriginBuffer, offset: 0, index: 4)
         gpu.dispatch2D(enc, gpu.pipeline("shade_samples"), width: Int(source.size.x), height: Int(source.size.y))
     }
 
@@ -440,15 +448,16 @@ extension Engine {
         public var height: Int
         public var samples: Int
         public var tile = 2048
-        /// Colour normalisation to reuse (e.g. from the live view); computed when nil.
-        public var colorStats: SIMD4<Float>?
+        /// Colour origin to use (e.g. the live view's, so the image keeps its colours); set from the
+        /// image when nil.
+        public var colorOrigin: Float?
 
-        public init(width: Int, height: Int, samples: Int, tile: Int = 2048, colorStats: SIMD4<Float>? = nil) {
+        public init(width: Int, height: Int, samples: Int, tile: Int = 2048, colorOrigin: Float? = nil) {
             self.width = width
             self.height = height
             self.samples = samples
             self.tile = tile
-            self.colorStats = colorStats
+            self.colorOrigin = colorOrigin
         }
     }
 
@@ -469,7 +478,7 @@ extension Engine {
             encodeStatsReset(enc, slot: slot)
             encodeIterate(enc, plan: plan, gbuf: g, origin: .zero, size: SIMD2(UInt32(gw), UInt32(gh)),
                           bufOrigin: .zero, bufStride: UInt32(gw))
-            if updateColors { encodeStatsSmooth(enc, slot: slot, alpha: 1) }
+            if updateColors { encodeColorOrigin(enc, slot: slot, zoomed: nil) }
             enc.endEncoding()
             cb.commit()
             cb.waitUntilCompleted()
@@ -496,13 +505,8 @@ extension Engine {
     public func renderStill(scene inScene: FractalScene, color: ColorSettings, options o: StillOptions,
                             progress: ((Double) -> Bool)? = nil) -> CGImage? {
         var scene = inScene
-        if let cs = o.colorStats {
-            setColorStats(cs)
-            calibrate(scene: &scene, width: o.width, height: o.height, updateColors: false)
-        } else {
-            resetSmoothing()
-            calibrate(scene: &scene, width: o.width, height: o.height)
-        }
+        colorOrigin = o.colorOrigin
+        calibrate(scene: &scene, width: o.width, height: o.height, updateColors: o.colorOrigin == nil)
         let tile = min(o.tile, max(o.width, o.height))
         let g = makeGBuffer(samples: tile * tile)
         let acc = makeAccumulator(width: tile, height: tile)

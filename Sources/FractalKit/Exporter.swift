@@ -19,17 +19,17 @@ public final class Exporter: @unchecked Sendable {
         public var width: Int
         public var height: Int
         public var samples: Int
-        /// Colour normalisation of the live view (keeps colours identical to the screen).
-        public var colorStats: SIMD4<Float>?
+        /// The live view's colour origin, so the image keeps the colours on screen.
+        public var colorOrigin: Float?
 
         public init(scene: FractalScene, color: ColorSettings, width: Int, height: Int, samples: Int,
-                    colorStats: SIMD4<Float>? = nil) {
+                    colorOrigin: Float? = nil) {
             self.scene = scene
             self.color = color
             self.width = width
             self.height = height
             self.samples = samples
-            self.colorStats = colorStats
+            self.colorOrigin = colorOrigin
         }
     }
 
@@ -37,7 +37,7 @@ public final class Exporter: @unchecked Sendable {
     public func exportImage(_ job: ImageJob, to url: URL, progress: @escaping (Double) -> Bool) throws {
         guard let image = engine.renderStill(scene: job.scene, color: job.color,
                                              options: .init(width: job.width, height: job.height, samples: job.samples,
-                                                            tile: 2048, colorStats: job.colorStats),
+                                                            tile: 2048, colorOrigin: job.colorOrigin),
                                              progress: progress) else {
             throw CocoaError(.userCancelled)
         }
@@ -56,7 +56,6 @@ public final class Exporter: @unchecked Sendable {
         /// View the video starts from (usually the overview).
         public var start: Viewport
         public var color: ColorSettings
-        public var colorStats: SIMD4<Float>?
         public var width: Int
         public var height: Int
         public var fps: Int
@@ -68,14 +67,13 @@ public final class Exporter: @unchecked Sendable {
         /// Palette phase advance per second.
         public var colorCycle: Double
 
-        public init(formula: Formula, target: Viewport, start: Viewport, color: ColorSettings, colorStats: SIMD4<Float>?,
+        public init(formula: Formula, target: Viewport, start: Viewport, color: ColorSettings,
                     width: Int, height: Int, fps: Int, duration: Double, samples: Int, codec: Codec,
                     spin: Double = 0, colorCycle: Double = 0) {
             self.formula = formula
             self.target = target
             self.start = start
             self.color = color
-            self.colorStats = colorStats
             self.width = width
             self.height = height
             self.fps = fps
@@ -153,13 +151,15 @@ public final class Exporter: @unchecked Sendable {
         var iter = IterationSettings()
         iter.maxIter = 1000
         let renderer = FrameRenderer(engine: engine, width: job.width, height: job.height)
-        if let cs = job.colorStats { engine.setColorStats(cs) } else { engine.resetSmoothing() }
+        engine.colorOrigin = nil
         // One reference at the target serves every frame (they all contain it).
         _ = engine.references.reference(formula: job.formula, view: job.target, minSide: Double(min(job.width, job.height)),
                                         length: 1024, blocking: true)
+        var previousView: Viewport?
         for f in 0..<frames {
             let t = frames > 1 ? Double(f) / Double(frames - 1) : 1
-            let scene = FractalScene(formula: job.formula, view: job.view(at: t), iter: iter)
+            let view = job.view(at: t)
+            let scene = FractalScene(formula: job.formula, view: view, iter: iter)
             var color = job.color
             color.offset = (color.offset + job.colorCycle * Double(f) / Double(job.fps)).truncatingRemainder(dividingBy: 1)
             guard let pool = adaptor.pixelBufferPool else { throw writer.error ?? CocoaError(.fileWriteUnknown) }
@@ -170,8 +170,12 @@ public final class Exporter: @unchecked Sendable {
             CVMetalTextureCacheCreateTextureFromImage(nil, cache, pixelBuffer, nil, .bgra8Unorm, job.width, job.height, 0, &cvTex)
             guard let cvTex, let texture = CVMetalTextureGetTexture(cvTex) else { throw CocoaError(.fileWriteUnknown) }
 
+            // as in a live flight, colours settle faster towards the end, so the video arrives at the
+            // colours its last view has on screen
+            let zoomed = previousView.map { (view.log2Radius - $0.log2Radius) * (t > 0.8 ? 4 : 1) }
             let (stats, ms) = renderer.render(scene: scene, color: color, samples: job.samples, into: texture,
-                                              statsAlpha: f == 0 ? 1 : 0.35)
+                                              zoomed: zoomed)
+            previousView = view
             // iterations only ever grow during a zoom-in, so colours never jump back
             let pixels = job.width * job.height
             let next = IterationTuner.adjust(maxIter: iter.maxIter, stats: stats, samples: pixels)
@@ -210,8 +214,8 @@ public final class Exporter: @unchecked Sendable {
     }
 }
 
-/// Renders complete frames (all samples, all tiles) into a texture, keeping colour statistics
-/// smoothed across frames.
+/// Renders complete frames (all samples) into a texture, moving the colour origin with the zoom
+/// from frame to frame.
 public final class FrameRenderer {
     let engine: Engine
     public let width: Int
@@ -229,10 +233,11 @@ public final class FrameRenderer {
         paced = PacedEncoder(queue: engine.queue)
     }
 
-    /// Returns the escape statistics of the first sample and the GPU time taken.
+    /// Renders one frame; `zoomed` is the zoom since the previous frame in doublings (nil for a first
+    /// frame). Returns the escape statistics of the first sample and the GPU time taken.
     @discardableResult
     public func render(scene: FractalScene, color: ColorSettings, samples: Int, into dst: MTLTexture,
-                statsAlpha: Float) -> (stats: FSStats, gpuMs: Double) {
+                zoomed: Double?) -> (stats: FSStats, gpuMs: Double) {
         let startMs = paced.gpuMs
         let size = SIMD2(UInt32(width), UInt32(height))
         var firstSlot: UInt32 = 0
@@ -244,7 +249,7 @@ public final class FrameRenderer {
             engine.encodeStatsReset(paced.enc, slot: slot)
             paced.iterate(engine, plan: plan, gbuf: g, origin: .zero, size: SIMD2(width, height),
                           bufOrigin: .zero, bufStride: UInt32(width))
-            if s == 0 { engine.encodeStatsSmooth(paced.enc, slot: slot, alpha: statsAlpha) }
+            if s == 0 { engine.encodeColorOrigin(paced.enc, slot: slot, zoomed: zoomed) }
             engine.encodeColorize(paced.enc, acc: acc, primary: .init(buffer: g, size: size), fallback: nil, color: color,
                                   accumulate: s > 0, outSize: size)
             if s == samples - 1 || samples <= 1 {

@@ -192,9 +192,9 @@ case "stats":
     cb.commit()
     cb.waitUntilCompleted()
     let s = engine.readStats(slot)
-    print(String(format: "maxIter %d (eff %d): escaped %u late %u unresolved %u interior %u  gpu %.1f ms  mean iterations %.0f",
+    print(String(format: "maxIter %d (eff %d): escaped %u late %u unresolved %u interior %u  escape range %u...%u  gpu %.1f ms  mean iterations %.0f",
                  scene.iter.maxIter, plan.effectiveMaxIter, s.escaped, s.lateEscaped, s.unresolved, s.interior,
-                 (cb.gpuEndTime - cb.gpuStartTime) * 1000, Double(s.iterations) / Double(w * h)))
+                 s.minIter, s.maxIter, (cb.gpuEndTime - cb.gpuStartTime) * 1000, Double(s.iterations) / Double(w * h)))
 
 case "video":
     let scene = makeScene()
@@ -202,7 +202,7 @@ case "video":
     var color = ColorSettings()
     color.palette = args.int("palette", 0)
     let job = Exporter.VideoJob(formula: scene.formula, target: scene.view, start: Viewport.home(for: scene.formula),
-                                color: color, colorStats: nil, width: w, height: h, fps: args.int("fps", 30),
+                                color: color, width: w, height: h, fps: args.int("fps", 30),
                                 duration: args.double("duration", 10), samples: args.int("samples", 2),
                                 codec: args.values["prores"] != nil ? .prores : .hevc, spin: args.double("spin", 0))
     let out = URL(fileURLWithPath: args.string("out", "zoom.mp4"))

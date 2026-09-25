@@ -104,8 +104,8 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     private var renderedCameraVersion = -1
     private var renderedColor = -1
     private var lastPlanPerturbed = false
-    private var lastPreviewSlot: UInt32?
-    private var statsSettled = true
+    /// Zoom of the view that last moved the colour origin.
+    private var colorLog2Radius = 0.0
     private var previewScale = 1.0
     private var computeBusy = false
     /// Incremented when surfaces are reallocated; passes encoded for older surfaces don't publish.
@@ -413,11 +413,13 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         let gs = SIMD2(UInt32(pw), UInt32(ph))
         engine.encodeStatsReset(iter, slot: slot)
         engine.encodeIterate(iter, plan: plan, gbuf: target, origin: .zero, size: gs, bufOrigin: .zero, bufStride: UInt32(pw))
-        // Ease colour statistics while moving (temporal stability); snap at rest or after jumps.
-        engine.encodeStatsSmooth(iter, slot: slot, alpha: snapColors || !moving ? 1 : 0.2)
+        // Colours move with the zoom only, so they hold at rest and while panning; jumps snap them.
+        // A flight's arrival settles them faster, so a place is reached with the colours it snaps to.
+        let arriving = (camera.flightProgress ?? 0) > 0.8
+        let zoomed = (v.log2Radius - colorLog2Radius) * (arriving ? 4 : 1)
+        engine.encodeColorOrigin(iter, slot: slot, zoomed: snapColors ? nil : zoomed)
+        colorLog2Radius = v.log2Radius
         snapColors = false
-        lastPreviewSlot = slot
-        statsSettled = !moving
         let outSize = SIMD2(UInt32(size.x), UInt32(size.y))
         if full1 {
             engine.encodeColorize(enc, acc: accum, primary: .init(buffer: gFull, size: outSize), fallback: nil,
@@ -453,11 +455,6 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
                                          enc: iter, blocking: false, statsSlot: slot, exclusive: true,
                                          interior: interiorLikely) else { return 0 }
         let target = stage == .aa ? gAA : gFull
-        if !statsSettled, let slot = lastPreviewSlot {
-            // motion ended: settle colours on the last preview's statistics
-            engine.encodeStatsSmooth(iter, slot: slot, alpha: 1)
-            statsSettled = true
-        }
         // Tiles write disjoint regions, so they run concurrently and share the slow-pixel tail.
         iter.endEncoding()
         guard let conc = cbIter?.makeComputeCommandEncoder(dispatchType: .concurrent) else { return 0 }

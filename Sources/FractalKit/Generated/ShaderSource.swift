@@ -886,33 +886,39 @@ kernel void stats_reset(device uint *stats [[buffer(7)]], constant uint &slot [[
     for (uint k = 1; k < 8; k++) stats[slot * 8 + k] = 0u;
 }
 
-// smooth.x = low iteration, smooth.y = span; alpha 1 snaps to the new statistics.
-kernel void stats_smooth(device const uint *stats [[buffer(7)]],
-                         device float4 *smooth [[buffer(0)]],
-                         constant float2 &args [[buffer(1)]],   // x: slot, y: alpha
+// The colour origin is the escape time at the start of the palette (origin.x; origin.w marks it set).
+// Colours are absolute (origin 0), so they stay attached to the plane while zooming, unless a view's
+// escape times span fewer than `span` octaves above 0 - deep views, whose escape times differ by a
+// tiny fraction - where the origin rises just enough to restore that span. It moves by `rate` of
+// the way to its target (rate 1 snaps, rate 0 holds) but never above the view's lowest escape time,
+// and holds in views without structure (escape times within 32 iterations), where moving it would
+// only sweep their few colours through the palette.
+kernel void color_origin(device const uint *stats [[buffer(7)]],
+                         device float4 *origin [[buffer(0)]],
+                         constant float3 &args [[buffer(1)]],   // x: stats slot, y: rate, z: span
                          uint i [[thread_position_in_grid]]) {
     if (i > 0) return;
     uint slot = uint(args.x);
-    uint lo = stats[slot * 8 + 0], hi = stats[slot * 8 + 1], esc = stats[slot * 8 + 2];
-    if (esc == 0u) return;
-    float4 s = smooth[0];
-    float nlo = float(lo), nspan = max(float(hi - lo), 1.0f);
-    float a = args.y;
-    if (s.w == 0.0f) a = 1.0f;
-    // smooth in log space so large jumps settle quickly
-    float llo = log2(1.0f + s.x), lsp = log2(1.0f + s.y);
-    llo = mix(llo, log2(1.0f + nlo), a);
-    lsp = mix(lsp, log2(1.0f + nspan), a);
-    smooth[0] = float4(exp2(llo) - 1.0f, exp2(lsp) - 1.0f, 0.0f, 1.0f);
+    uint lo = stats[slot * 8 + 0], hi = stats[slot * 8 + 1], escaped = stats[slot * 8 + 2];
+    if (escaped == 0u) return;
+    float low = float(lo), high = float(hi);
+    float k = exp2(args.z);
+    float target = max((k * (1.0f + low) - (1.0f + high)) / (k - 1.0f), 0.0f);
+    float4 o = origin[0];
+    float rate = o.w == 0.0f ? 1.0f : (high - low < 32.0f ? 0.0f : args.y);
+    // in log space, so that the origin keeps its relative pace from shallow to deep views
+    float moved = exp2(mix(log2(1.0f + o.x), log2(1.0f + target), rate)) - 1.0f;
+    origin[0] = float4(min(moved, low), 0.0f, 0.0f, 1.0f);
 }
 
 // ---------------------------------------------------------------------------------------------
 // Colouring
 
-inline float3 shade(GSample s, constant FSColorParams &C, float4 st, texture2d<float> pal, sampler ps) {
+inline float3 shade(GSample s, constant FSColorParams &C, float4 origin, texture2d<float> pal, sampler ps) {
     if (s.n == FS_INTERIOR) return C.interior.rgb;
-    float base = floor(st.x);
-    float x = max(float(int(s.n) - int(base)) + s.frac - (st.x - base), 0.0f);
+    // escape time above the colour origin; the integer parts subtract exactly at any depth
+    float base = floor(origin.x);
+    float x = max(float(int(s.n) - int(base)) + s.frac - (origin.x - base), 0.0f);
     float t;
     if (C.mapping == 0) t = x / 64.0f;
     else if (C.mapping == 1) t = sqrt(x) / 4.0f;
@@ -970,7 +976,7 @@ kernel void colorize(texture2d<float, access::read_write> acc [[texture(0)]],
                      device const GSample *g [[buffer(0)]],
                      device const uint *tileDone [[buffer(2)]],
                      constant FSColorParams &C [[buffer(3)]],
-                     device const float4 *smooth [[buffer(4)]],
+                     device const float4 *origin [[buffer(4)]],
                      uint2 o [[thread_position_in_grid]]) {
     if (o.x >= C.outSize.x || o.y >= C.outSize.y) return;
     constexpr sampler ps(filter::linear, s_address::repeat, t_address::clamp_to_edge);
@@ -980,7 +986,7 @@ kernel void colorize(texture2d<float, access::read_write> acc [[texture(0)]],
         uint2 t = min(o / C.tileSize, C.tileGrid - 1);
         usePrimary = tileDone[t.y * C.tileGrid.x + t.x] != 0u;
     }
-    if (usePrimary) col = shade(g[o.y * C.gSize.x + o.x], C, smooth[0], pal, ps);
+    if (usePrimary) col = shade(g[o.y * C.gSize.x + o.x], C, origin[0], pal, ps);
     else col = upsample_color(fallback, C.fbSize, C.outSize, o);
     float4 prev = C.accumulate != 0u ? acc.read(o) : float4(0.0f);
     acc.write(prev + float4(col, 1.0f), o);
@@ -991,11 +997,11 @@ kernel void shade_samples(texture2d<float, access::write> dst [[texture(0)]],
                           texture2d<float> pal [[texture(1)]],
                           device const GSample *g [[buffer(0)]],
                           constant FSColorParams &C [[buffer(3)]],
-                          device const float4 *smooth [[buffer(4)]],
+                          device const float4 *origin [[buffer(4)]],
                           uint2 o [[thread_position_in_grid]]) {
     if (o.x >= C.gSize.x || o.y >= C.gSize.y) return;
     constexpr sampler ps(filter::linear, s_address::repeat, t_address::clamp_to_edge);
-    dst.write(float4(shade(g[o.y * C.gSize.x + o.x], C, smooth[0], pal, ps), 1.0f), o);
+    dst.write(float4(shade(g[o.y * C.gSize.x + o.x], C, origin[0], pal, ps), 1.0f), o);
 }
 
 // Scales a coloured preview up into the accumulator (one sample).

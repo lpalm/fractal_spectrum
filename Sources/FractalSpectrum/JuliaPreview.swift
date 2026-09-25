@@ -81,7 +81,7 @@ final class JuliaPreviewRenderer: NSObject, MTKViewDelegate {
         let w = Int(view.drawableSize.width), h = Int(view.drawableSize.height)
         guard let scene, w > 0, h > 0, let drawable = view.currentDrawable else { return }
         if frames?.width != w || frames?.height != h { frames = FrameRenderer(engine: engine, width: w, height: h) }
-        frames?.render(scene: scene, color: color, samples: 2, into: drawable.texture, statsAlpha: 1)
+        frames?.render(scene: scene, color: color, samples: 2, into: drawable.texture, zoomed: nil)
         guard let cb = engine.queue.makeCommandBuffer() else { return }
         cb.present(drawable)
         cb.commit()
