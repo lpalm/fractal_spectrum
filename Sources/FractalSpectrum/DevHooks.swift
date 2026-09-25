@@ -69,9 +69,13 @@ final class DevHooks {
             }
         case "speed": model.pilot.speed = Double(arg) ?? model.pilot.speed
         case "export-image":
-            model.export.imageSize = ExportController.imageSizes[0]
-            model.export.imageSamples = 4
-            model.export.exportImage(model: model, to: URL(fileURLWithPath: arg))
+            // export-image:<path> renders a small image there; export-image: saves to the image folder
+            // with the current settings
+            if !arg.isEmpty {
+                model.export.imageSize = ExportController.imageSizes[0]
+                model.export.imageSamples = 4
+            }
+            model.export.exportImage(model: model, to: arg.isEmpty ? nil : URL(fileURLWithPath: arg))
         case "export-video":
             model.export.videoSize = ExportController.videoSizes[0]
             model.export.fps = 30
@@ -79,6 +83,20 @@ final class DevHooks {
             model.export.videoSamples = 1
             model.export.exportVideo(model: model, to: URL(fileURLWithPath: arg))
         case "export-cancel": model.export.cancel()
+        case "export-sheet":
+            // export-sheet:image / export-sheet:video opens the export sheet; export-sheet:off closes it
+            if let kind = ExportController.Kind.allCases.first(where: { $0.rawValue.lowercased() == arg }) {
+                model.openExport(kind)
+            } else {
+                model.showExport = false
+            }
+        case "sheet":
+            // sheet:<path> saves the open sheet (e.g. the export settings) as an image
+            if let sheet = NSApp.windows.first(where: { $0.isSheet && $0.isVisible }), let content = sheet.contentView,
+               let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
+                content.cacheDisplay(in: content.bounds, to: bitmap)
+                if let image = bitmap.cgImage { try? Engine.writePNG(image, to: URL(fileURLWithPath: arg)) }
+            }
         case "movie":
             // movie:<path> records the view to that file; movie:off stops
             if arg == "off" { model.stopRecording() } else { model.startRecording(to: URL(fileURLWithPath: arg)) }

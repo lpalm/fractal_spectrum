@@ -83,10 +83,19 @@ public final class Exporter: @unchecked Sendable {
 
         public var frameCount: Int { max(1, Int((duration * Double(fps)).rounded())) }
 
+        /// Share of the video spent speeding up at the start, and again slowing down at the end.
+        public static let easing = 0.08
+
+        /// Zoom speed between the eased ends, in doublings of magnification per second, of a video
+        /// zooming in `doublings` times over `duration` seconds.
+        public static func cruiseSpeed(doublings: Double, duration: Double) -> Double {
+            doublings / (duration * (1 - easing))
+        }
+
         /// Zoom path: log radius moves at constant speed with eased ends; the target glides to the
         /// centre faster than the view shrinks, so it ends dead centre.
         public func view(at t: Double) -> Viewport {
-            let easing = 0.08
+            let easing = VideoJob.easing
             // trapezoidal speed profile, integrated
             func position(_ x: Double) -> Double {
                 if x < easing { return x * x / (2 * easing) }

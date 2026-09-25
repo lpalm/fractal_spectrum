@@ -1,12 +1,14 @@
 import AppKit
 import SwiftUI
 import Observation
-import UniformTypeIdentifiers
 import FractalKit
 
-/// Image and video export settings plus the progress of a running export.
+private let defaults = UserDefaults.standard
+
+/// Image and video export settings, where exports are saved, and the progress of a running export.
 @MainActor @Observable
 final class ExportController {
+    /// What the export sheet produces.
     enum Kind: String, CaseIterable, Identifiable {
         case image = "Image", video = "Video"
         var id: String { rawValue }
@@ -37,16 +39,47 @@ final class ExportController {
         Size(name: "Vertical 1080×1920", width: 1080, height: 1920),
     ]
 
+    /// Longest zoom video, in seconds.
+    static let longestVideo = 1800.0
+
     var kind = Kind.image
-    var imageSize = ExportController.imageSizes[0]
-    var imageSamples = 16
-    var videoSize = ExportController.videoSizes[0]
-    var fps = 60
+    /// Suggested for each view when the sheet opens.
     var duration = 20.0
-    var videoSamples = 4
-    var codec = Exporter.Codec.hevc
-    var spin = 0.0
-    var cycleColors = false
+
+    // Settings remembered across launches
+    var imageSize = ExportController.imageSizes.first { $0.name == defaults.string(forKey: "export.imageSize") }
+        ?? ExportController.imageSizes[0] {
+        didSet { defaults.set(imageSize.name, forKey: "export.imageSize") }
+    }
+    var imageSamples = defaults.object(forKey: "export.imageSamples") as? Int ?? 16 {
+        didSet { defaults.set(imageSamples, forKey: "export.imageSamples") }
+    }
+    var videoSize = ExportController.videoSizes.first { $0.name == defaults.string(forKey: "export.videoSize") }
+        ?? ExportController.videoSizes[0] {
+        didSet { defaults.set(videoSize.name, forKey: "export.videoSize") }
+    }
+    var fps = defaults.object(forKey: "export.fps") as? Int ?? 60 {
+        didSet { defaults.set(fps, forKey: "export.fps") }
+    }
+    var videoSamples = defaults.object(forKey: "export.videoSamples") as? Int ?? 4 {
+        didSet { defaults.set(videoSamples, forKey: "export.videoSamples") }
+    }
+    var codec = Exporter.Codec(rawValue: defaults.string(forKey: "export.codec") ?? "") ?? .hevc {
+        didSet { defaults.set(codec.rawValue, forKey: "export.codec") }
+    }
+    var spin = defaults.object(forKey: "export.spin") as? Double ?? 0 {
+        didSet { defaults.set(spin, forKey: "export.spin") }
+    }
+    var cycleColors = defaults.bool(forKey: "export.cycleColors") {
+        didSet { defaults.set(cycleColors, forKey: "export.cycleColors") }
+    }
+    /// Folders that exports are saved to.
+    var imageFolder = ExportController.savedFolder("export.imageFolder", default: .picturesDirectory) {
+        didSet { defaults.set(imageFolder.path, forKey: "export.imageFolder") }
+    }
+    var videoFolder = ExportController.savedFolder("export.videoFolder", default: .moviesDirectory) {
+        didSet { defaults.set(videoFolder.path, forKey: "export.videoFolder") }
+    }
 
     // Running export
     var running = false
@@ -67,21 +100,53 @@ final class ExportController {
         let elapsed = Date().timeIntervalSince(started)
         let left = elapsed / progress * (1 - progress)
         if left < 60 { return String(format: "%.0f s left", left) }
-        return String(format: "%.0f min left", left / 60)
+        if left < 3600 { return String(format: "%.0f min left", left / 60) }
+        return String(format: "%.1f h left", left / 3600)
     }
 
-    /// Suggested video length: about one doubling of zoom per ~0.45 s, clamped to 10 s…5 min.
+    /// Suggested video length: about one doubling of zoom per 0.45 s, within 10 s and the longest video.
     static func suggestedDuration(for view: Viewport, from start: Viewport) -> Double {
         let doublings = max(start.log2Radius - view.log2Radius, 1)
-        return min(300, max(10, (doublings * 0.45).rounded()))
+        return min(longestVideo, max(10, (doublings * 0.45).rounded()))
     }
 
-    private static func askForURL(type: UTType, ext: String, in directory: FileManager.SearchPathDirectory) -> URL? {
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [type]
-        panel.nameFieldStringValue = defaultName("Spectrum", ext)
-        panel.directoryURL = FileManager.default.urls(for: directory, in: .userDomainMask).first
-        return panel.runModal() == .OK ? panel.url : nil
+    /// The folder the current kind of export is saved to.
+    var folder: URL { kind == .image ? imageFolder : videoFolder }
+
+    /// Lets the user pick another folder for the current kind of export.
+    func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Choose"
+        panel.message = kind == .image ? "Images are saved to this folder." : "Videos are saved to this folder."
+        panel.directoryURL = folder
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        if kind == .image { imageFolder = url } else { videoFolder = url }
+    }
+
+    /// The remembered folder while it still exists, else the given standard folder.
+    private static func savedFolder(_ key: String, default directory: FileManager.SearchPathDirectory) -> URL {
+        var isDirectory: ObjCBool = false
+        if let path = defaults.string(forKey: key),
+           FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue {
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
+        return FileManager.default.urls(for: directory, in: .userDomainMask)[0]
+    }
+
+    /// A file in `folder` named after the current time ("Spectrum 2026-09-25 at 09.41.00.png"),
+    /// numbered if that name is taken.
+    private static func newFile(in folder: URL, extension ext: String) -> URL {
+        let name = defaultName("Spectrum", ext)
+        var url = folder.appendingPathComponent(name)
+        var number = 2
+        while FileManager.default.fileExists(atPath: url.path) {
+            url = folder.appendingPathComponent((name as NSString).deletingPathExtension + " \(number).\(ext)")
+            number += 1
+        }
+        return url
     }
 
     /// "Prefix 2026-09-25 at 09.41.00.ext", like the system's screenshots.
@@ -91,8 +156,9 @@ final class ExportController {
         return "\(prefix) \(formatter.string(from: Date())).\(ext)"
     }
 
-    func exportImage(model: AppModel, to preset: URL? = nil) {
-        guard let url = preset ?? ExportController.askForURL(type: .png, ext: "png", in: .picturesDirectory) else { return }
+    /// Renders the current view as an image into the image folder (or to `destination`).
+    func exportImage(model: AppModel, to destination: URL? = nil) {
+        let url = destination ?? ExportController.newFile(in: imageFolder, extension: "png")
         var iter = model.iter
         iter.maxIter = max(iter.maxIter, 1000)
         let job = Exporter.ImageJob(scene: FractalScene(formula: model.formula, view: model.camera.view, iter: iter),
@@ -106,15 +172,14 @@ final class ExportController {
         }
     }
 
-    func exportVideo(model: AppModel, to preset: URL? = nil) {
-        guard let url = preset ?? ExportController.askForURL(type: codec == .prores ? .quickTimeMovie : .mpeg4Movie,
-                                                             ext: codec == .prores ? "mov" : "mp4",
-                                                             in: .moviesDirectory) else { return }
+    /// Renders a zoom from the overview to the current view into the video folder (or to `destination`).
+    func exportVideo(model: AppModel, to destination: URL? = nil) {
+        let url = destination ?? ExportController.newFile(in: videoFolder, extension: codec == .prores ? "mov" : "mp4")
         let job = Exporter.VideoJob(formula: model.formula, target: model.camera.view,
                                     start: Viewport.home(for: model.formula), color: model.color,
                                     width: videoSize.width, height: videoSize.height, fps: fps, duration: duration,
                                     samples: videoSamples, codec: codec, spin: spin, colorCycle: cycleColors ? 0.05 : 0)
-        run("Rendering \(job.frameCount) frames", to: url) { [weak self] exporter, token in
+        run("Rendering \(job.frameCount.formatted()) frames", to: url) { [weak self] exporter, token in
             try exporter.exportVideo(job, to: url) { fraction, image in
                 DispatchQueue.main.async {
                     self?.progress = fraction
@@ -158,7 +223,7 @@ final class ExportController {
     }
 }
 
-/// Export sheet: image and zoom-video settings with live progress.
+/// Export sheet: image and zoom-video settings in sections, where the file goes, and live progress.
 struct ExportSheet: View {
     @Bindable var model: AppModel
     @Bindable var export: ExportController
@@ -178,7 +243,23 @@ struct ExportSheet: View {
                 .frame(width: 180)
                 .disabled(export.running)
             }
-            if export.kind == .image { imageSettings } else { videoSettings }
+            Form {
+                if export.kind == .image { imageSections } else { videoSections }
+                Section("Save to") {
+                    LabeledContent {
+                        Button("Change…") { export.chooseFolder() }
+                    } label: {
+                        Text((export.folder.path as NSString).abbreviatingWithTildeInPath)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(export.folder.path)
+                    }
+                }
+            }
+            .formStyle(.grouped)
+            .scrollDisabled(true)
+            .fixedSize(horizontal: false, vertical: true)
+            .disabled(export.running)
             if export.running || export.lastOutput != nil || !export.status.isEmpty { progressView }
             HStack {
                 Text(summary)
@@ -187,7 +268,7 @@ struct ExportSheet: View {
                 Spacer()
                 Button("Close") { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button(export.kind == .image ? "Save Image…" : "Render Video…") {
+                Button(export.kind == .image ? "Save Image" : "Render Video") {
                     if export.kind == .image { export.exportImage(model: model) } else { export.exportVideo(model: model) }
                 }
                 .buttonStyle(.glassProminent)
@@ -196,23 +277,14 @@ struct ExportSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 520)
+        .frame(width: 540)
         .onAppear {
             export.duration = ExportController.suggestedDuration(for: model.camera.view, from: Viewport.home(for: model.formula))
         }
     }
 
-    private var summary: String {
-        let v = model.camera.view
-        if export.kind == .image {
-            let mp = Double(export.imageSize.width * export.imageSize.height) / 1e6
-            return String(format: "%.0f megapixels · zoom %@", mp, v.zoomText)
-        }
-        return "\(Int(export.duration * Double(export.fps))) frames · home → \(v.zoomText)"
-    }
-
-    private var imageSettings: some View {
-        Form {
+    @ViewBuilder private var imageSections: some View {
+        Section("Image") {
             Picker("Size", selection: $export.imageSize) {
                 ForEach(ExportController.imageSizes) { Text($0.label).tag($0) }
             }
@@ -223,14 +295,10 @@ struct ExportSheet: View {
                 Text("Extreme (64×)").tag(64)
             }
         }
-        .formStyle(.grouped)
-        .scrollDisabled(true)
-        .frame(height: 120)
-        .disabled(export.running)
     }
 
-    private var videoSettings: some View {
-        Form {
+    @ViewBuilder private var videoSections: some View {
+        Section("Format") {
             Picker("Resolution", selection: $export.videoSize) {
                 ForEach(ExportController.videoSizes) { Text($0.label).tag($0) }
             }
@@ -238,39 +306,78 @@ struct ExportSheet: View {
                 Text("30 fps").tag(30)
                 Text("60 fps").tag(60)
             }
+            Picker("Codec", selection: $export.codec) {
+                ForEach(Exporter.Codec.allCases) { Text($0.rawValue).tag($0) }
+            }
+        }
+        Section("Zoom") {
             LabeledContent("Duration") {
                 HStack {
-                    Slider(value: $export.duration, in: 5...300, step: 1)
-                    Text("\(Int(export.duration)) s").monospacedDigit().frame(width: 44, alignment: .trailing)
+                    // logarithmic, so that short videos can be set to the second and long ones to the minute
+                    Slider(value: Binding(get: { log(export.duration) }, set: { export.duration = exp($0).rounded() }),
+                           in: log(5)...log(ExportController.longestVideo))
+                    Text(durationText).monospacedDigit().frame(width: 52, alignment: .trailing)
                 }
             }
+            LabeledContent("Speed", value: speedText)
+            LabeledContent("Spin") {
+                HStack {
+                    Slider(value: $export.spin, in: 0...720, step: 15)
+                    Text("\(Int(export.spin))°").monospacedDigit().frame(width: 52, alignment: .trailing)
+                }
+            }
+        }
+        Section("Look") {
             Picker("Smoothness", selection: $export.videoSamples) {
                 Text("Fast (1×)").tag(1)
                 Text("Good (2×)").tag(2)
                 Text("Best (4×)").tag(4)
                 Text("Extreme (9×)").tag(9)
             }
-            Picker("Codec", selection: $export.codec) {
-                ForEach(Exporter.Codec.allCases) { Text($0.rawValue).tag($0) }
-            }
-            LabeledContent("Spin") {
-                HStack {
-                    Slider(value: $export.spin, in: 0...720, step: 15)
-                    Text("\(Int(export.spin))°").monospacedDigit().frame(width: 44, alignment: .trailing)
-                }
-            }
             Toggle("Animate colours", isOn: $export.cycleColors)
         }
-        .formStyle(.grouped)
-        .scrollDisabled(true)
-        .frame(height: 330)
-        .disabled(export.running)
+    }
+
+    /// "45 s" or "12:30".
+    private var durationText: String {
+        let seconds = Int(export.duration)
+        return seconds < 60 ? "\(seconds) s" : String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+
+    /// How much the video magnifies per second and per frame between its eased start and end.
+    private var speedText: String {
+        let doublings = Viewport.home(for: model.formula).log2Radius - model.camera.view.log2Radius
+        guard doublings > 0 else { return "—" }
+        let perSecond = Exporter.VideoJob.cruiseSpeed(doublings: doublings, duration: export.duration)
+        return "\(factorText(doublings: perSecond)) per second · \(factorText(doublings: perSecond / Double(export.fps))) per frame"
+    }
+
+    /// A magnification of 2^doublings: "×1.026", "×4.6", "×2,048" or, beyond a million, "×1.5e54".
+    private func factorText(doublings: Double) -> String {
+        let factor = exp2(doublings)
+        switch factor {
+        case ..<2: return String(format: "×%.3f", factor)
+        case ..<10: return String(format: "×%.1f", factor)
+        case ..<1e6: return "×" + Int(factor.rounded()).formatted()
+        default:
+            let (mantissa, exponent) = scientific(log10: doublings * log10(2.0), digits: 1)
+            return String(format: "×%.1fe%d", mantissa, exponent)
+        }
+    }
+
+    private var summary: String {
+        let view = model.camera.view
+        if export.kind == .image {
+            let megapixels = Double(export.imageSize.width * export.imageSize.height) / 1e6
+            return String(format: "%.0f megapixels · zoom %@", megapixels, view.zoomText)
+        }
+        return "\(Int(export.duration * Double(export.fps)).formatted()) frames · home → \(view.zoomText)"
     }
 
     private var progressView: some View {
         HStack(spacing: 14) {
-            if let p = export.preview {
-                Image(nsImage: p).resizable().aspectRatio(contentMode: .fit)
+            if let preview = export.preview {
+                Image(nsImage: preview).resizable().aspectRatio(contentMode: .fit)
                     .frame(width: 96, height: 54)
                     .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
