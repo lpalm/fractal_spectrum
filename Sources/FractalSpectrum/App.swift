@@ -28,6 +28,9 @@ struct FractalSpectrumApp: App {
                 }
                 .keyboardShortcut("e", modifiers: .command)
             }
+            CommandGroup(after: .pasteboard) {
+                Button("Copy Image") { model.copyImage() }.keyboardShortcut("c", modifiers: [.command, .option])
+            }
             CommandMenu("Navigate") {
                 Button("Home") { model.goHome() }.keyboardShortcut("h", modifiers: [])
                 Button("Zoom In") { model.zoomStep(-1) }.keyboardShortcut("=", modifiers: .command)

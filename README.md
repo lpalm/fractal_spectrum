@@ -42,6 +42,7 @@ swift build -c release --product fscli
 | ⌘S / ⌘E | Export image / zoom video |
 | ⌘[ / ⌘] | Back / forward through visited views |
 | ⇧⌘C / ⌘L | Copy / go to coordinates |
+| ⌥⌘C | Copy image |
 
 ## How it works
 

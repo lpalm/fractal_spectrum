@@ -383,6 +383,14 @@ final class AppModel {
         return "re: \(v.center.re.string(digits: digits))\nim: \(v.center.im.string(digits: digits))\nzoom: \(v.zoomText)"
     }
 
+    /// Puts the view as shown (at the canvas resolution) on the pasteboard.
+    func copyImage() {
+        guard let image = renderer.captureCanvas() else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.writeObjects([NSImage(cgImage: image, size: .zero)])
+        show("Image copied")
+    }
+
     func copyCoordinates() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(coordinatesText, forType: .string)

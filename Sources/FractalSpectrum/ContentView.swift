@@ -742,6 +742,7 @@ struct HelpOverlay: View {
         ("F", "Full screen"),
         ("Space", "Hide interface"),
         ("⇧⌘C / ⌘L", "Copy / go to coordinates"),
+        ("⌥⌘C", "Copy image"),
         ("⌘[ / ⌘]", "Back / forward through visited views"),
     ]
 
