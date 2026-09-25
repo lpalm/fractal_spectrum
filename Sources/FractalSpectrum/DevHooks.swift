@@ -33,6 +33,9 @@ final class DevHooks {
                 model.camera.jump(to: v)
             }
         case "home": model.goHome()
+        case "back": model.goBack()
+        case "forward": model.goForward()
+        case "goto": model.goTo(text: arg.replacingOccurrences(of: "|", with: "\n"))
         case "minibrot": model.findMinibrot()
         case "tour": if arg == "off" { model.stopTour() } else { model.startTour() }
         case "zoom": model.zoomStep(Double(arg) ?? -1)

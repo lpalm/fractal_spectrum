@@ -61,6 +61,9 @@ struct ContentView: View {
         .sheet(isPresented: $model.showExport) {
             ExportSheet(model: model, export: model.export)
         }
+        .sheet(isPresented: $model.showGoTo) {
+            GoToSheet(model: model)
+        }
         .animation(.spring(duration: 0.4), value: model.showUI)
         .animation(.easeOut(duration: 0.2), value: model.showHelp)
         .animation(.spring(duration: 0.6), value: model.caption)
@@ -664,6 +667,50 @@ struct CaptionCard: View {
     }
 }
 
+/// Paste coordinates (as copied with ⇧⌘C, or "re im zoom") and fly there.
+struct GoToSheet: View {
+    @Bindable var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var text = ""
+    @State private var failed = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Go to Coordinates")
+                .font(.system(size: 20, weight: .bold, design: .rounded))
+            Text("Paste \"re: … im: … zoom: …\" as copied with ⇧⌘C, or three numbers: real, imaginary, log₁₀ zoom.")
+                .font(.system(size: 12, design: .rounded))
+                .foregroundStyle(.secondary)
+            TextEditor(text: $text)
+                .font(.system(size: 12, design: .monospaced))
+                .frame(height: 120)
+                .scrollContentBackground(.hidden)
+                .padding(6)
+                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            if failed {
+                Text("Couldn't read coordinates from that text.")
+                    .font(.system(size: 12, design: .rounded))
+                    .foregroundStyle(.red)
+            }
+            HStack {
+                Button("Paste") { text = NSPasteboard.general.string(forType: .string) ?? text }
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Go") {
+                    if model.goTo(text: text) { dismiss() } else { failed = true }
+                }
+                .buttonStyle(.glassProminent)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 520)
+        .onAppear {
+            if let clip = NSPasteboard.general.string(forType: .string), clip.contains("re:") { text = clip }
+        }
+    }
+}
+
 struct HelpOverlay: View {
     @Bindable var model: AppModel
 
@@ -686,7 +733,8 @@ struct HelpOverlay: View {
         ("M", "Find a mini-Mandelbrot in view"),
         ("F", "Full screen"),
         ("Space", "Hide interface"),
-        ("⇧⌘C", "Copy coordinates"),
+        ("⇧⌘C / ⌘L", "Copy / go to coordinates"),
+        ("⌘[ / ⌘]", "Back / forward through visited views"),
     ]
 
     var body: some View {

@@ -74,6 +74,13 @@ final class AppModel {
     // Places saved by the user
     var bookmarks: [Location] = []
 
+    // Navigation history: views where the camera came to rest
+    @ObservationIgnored private var history: [Location] = []
+    @ObservationIgnored private var historyIndex = -1
+    @ObservationIgnored private var restSince = 0.0
+    @ObservationIgnored private var lastRestVersion = -1
+    var showGoTo = false
+
     // Guided tour
     var touring = false
     var caption: Caption?
@@ -378,7 +385,91 @@ final class AppModel {
 
     // MARK: Per-frame
 
+    // MARK: History
+
+    /// Records the view once the camera has rested for a moment after moving.
+    private func recordHistory() {
+        let now = CACurrentMediaTime()
+        if camera.isAnimating || touring || autopilot {
+            restSince = now
+            return
+        }
+        guard camera.version != lastRestVersion, now - restSince > 0.8 else { return }
+        lastRestVersion = camera.version
+        let place = Location(id: "h\(camera.version)", name: "History", formula: formula, view: camera.view,
+                             palette: color.palette, maxIter: nil)
+        if historyIndex >= 0, historyIndex < history.count,
+           let v = history[historyIndex].viewport, abs(v.log2Radius - camera.view.log2Radius) < 0.3,
+           camera.view.center.minus(v.center).log2Abs < v.log2Radius - 3 {
+            return   // barely moved
+        }
+        history = Array(history.prefix(historyIndex + 1))
+        history.append(place)
+        if history.count > 200 { history.removeFirst(history.count - 200) }
+        historyIndex = history.count - 1
+    }
+
+    func goBack() { stepHistory(-1) }
+    func goForward() { stepHistory(1) }
+
+    private func stepHistory(_ d: Int) {
+        let i = historyIndex + d
+        guard i >= 0, i < history.count, let v = history[i].viewport else {
+            show(d < 0 ? "Start of history" : "End of history")
+            return
+        }
+        historyIndex = i
+        let place = history[i]
+        if place.formula != formula {
+            formula = place.formula
+            camera.jump(to: Viewport.home(for: formula))
+        }
+        renderer.snapColors = true
+        camera.fly(to: v, duration: min(3, max(0.8, abs(v.log2Radius - camera.view.log2Radius) * 0.06)))
+        lastRestVersion = -1
+    }
+
+    // MARK: Coordinates
+
+    /// Flies to coordinates in the format produced by Copy Coordinates ("re: … im: … zoom: …"),
+    /// or three whitespace/comma separated numbers (re, im, log10 zoom).
+    @discardableResult
+    func goTo(text: String) -> Bool {
+        var re: String?, im: String?, zoom: Double?
+        for line in text.split(whereSeparator: { $0 == "\n" || $0 == ";" }) {
+            let parts = line.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            guard parts.count == 2 else { continue }
+            switch parts[0].lowercased() {
+            case "re", "real", "x": re = parts[1]
+            case "im", "imag", "imaginary", "y": im = parts[1]
+            case "zoom", "magnification":
+                let z = parts[1].replacingOccurrences(of: "×", with: "")
+                if let e = z.range(of: "e", options: .caseInsensitive), let m = Double(z[..<e.lowerBound]),
+                   let x = Double(z[e.upperBound...]) {
+                    zoom = log10(m) + x
+                } else if let v = Double(z) {
+                    zoom = log10(max(v, 1e-9))
+                }
+            default: break
+            }
+        }
+        if re == nil {
+            let nums = text.split(whereSeparator: { $0 == " " || $0 == "," || $0 == "\n" || $0 == "\t" }).map(String.init)
+            if nums.count >= 2 { re = nums[0]; im = nums[1] }
+            if nums.count >= 3 { zoom = Double(nums[2]) }
+        }
+        guard let r = re, let i = im else { return false }
+        let z = zoom ?? camera.view.zoomLog10
+        let place = Location(id: "goto", name: "Coordinates", formula: formula, re: r, im: i, zoom: z)
+        guard let v = place.viewport else { return false }
+        renderer.snapColors = true
+        camera.fly(to: v)
+        show("Flying to " + ScaleFact.magnification(z))
+        return true
+    }
+
     private func tick(_ dt: Double) {
+        recordHistory()
         if var f = fade {
             f.t += dt / 0.45
             if f.t >= 1 {

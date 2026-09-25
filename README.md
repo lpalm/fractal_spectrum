@@ -40,6 +40,8 @@ swift build -c release --product fscli
 | L | Relief lighting |
 | Space | Hide the interface |
 | ⌘S / ⌘E | Export image / zoom video |
+| ⌘[ / ⌘] | Back / forward through visited views |
+| ⇧⌘C / ⌘L | Copy / go to coordinates |
 
 ## How it works
 
