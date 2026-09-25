@@ -6,7 +6,7 @@ extension Engine {
     /// Raw escape iterations of every sample, for verification against the CPU oracle.
     public func iterationMap(scene: FractalScene, width: Int, height: Int) -> (n: [UInt32], frac: [Float], plan: Plan)? {
         let g = gpu.device.makeBuffer(length: width * height * 16, options: .storageModeShared)!
-        guard let cb = gpu.queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return nil }
+        guard let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return nil }
         let slot = nextStatsSlot()
         guard let plan = makePlan(scene: scene, grid: Grid(width: width, height: height), enc: enc, blocking: true,
                                   statsSlot: slot) else {
@@ -36,7 +36,7 @@ extension Engine {
                               interior: Bool = true) -> Double {
         let g = makeGBuffer(samples: width * height)
         func pass(wait: Bool = true) -> Double {
-            guard let cb = gpu.queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return .infinity }
+            guard let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return .infinity }
             let slot = nextStatsSlot()
             guard let plan = makePlan(scene: scene, grid: Grid(width: width, height: height), enc: enc, blocking: true,
                                       statsSlot: slot, interior: interior) else {

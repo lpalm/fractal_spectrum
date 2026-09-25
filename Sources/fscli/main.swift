@@ -182,7 +182,7 @@ case "stats":
     // Iteration statistics of one pass at a fixed iteration limit.
     let scene = makeScene()
     let (w, h) = (args.int("w", 64), args.int("h", 40))
-    guard let cb = engine.gpu.queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { exit(1) }
+    guard let cb = engine.queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { exit(1) }
     let slot = engine.nextStatsSlot()
     let g = engine.makeGBuffer(samples: w * h)
     guard let plan = engine.makePlan(scene: scene, grid: .init(width: w, height: h), enc: enc, blocking: true, statsSlot: slot) else { exit(1) }

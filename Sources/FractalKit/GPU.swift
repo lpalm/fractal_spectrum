@@ -2,15 +2,15 @@ import Foundation
 import Metal
 import CFractal
 
-/// Owns the Metal device, command queue, compiled shader library and specialised pipelines.
+/// Owns the Metal device, compiled shader library and specialised pipelines.
 public final class GPU: @unchecked Sendable {
     public static let shared = GPU()
 
     public let device: MTLDevice
-    public let queue: MTLCommandQueue
     let library: MTLLibrary
     private var cache: [PipelineKey: MTLComputePipelineState] = [:]
     private let lock = NSLock()
+    private var interactiveUntil = 0.0
 
     /// Function-constant specialisation of an escape-time or BLA kernel.
     struct PipelineKey: Hashable {
@@ -25,11 +25,10 @@ public final class GPU: @unchecked Sendable {
     }
 
     private init() {
-        guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else {
+        guard let device = MTLCreateSystemDefaultDevice() else {
             fatalError("Metal is not available")
         }
         self.device = device
-        self.queue = queue
         let options = MTLCompileOptions()
         options.mathMode = .fast
         options.languageVersion = .version3_1
@@ -39,6 +38,13 @@ public final class GPU: @unchecked Sendable {
             fatalError("Shader compilation failed: \(error)")
         }
     }
+
+    /// Called while the interactive view is moving; offline renders then keep their command buffers short.
+    public func noteInteraction() {
+        lock.withLock { interactiveUntil = ProcessInfo.processInfo.systemUptime + 0.3 }
+    }
+
+    var isInteractive: Bool { lock.withLock { ProcessInfo.processInfo.systemUptime < interactiveUntil } }
 
     func pipeline(_ key: PipelineKey) -> MTLComputePipelineState {
         lock.lock()

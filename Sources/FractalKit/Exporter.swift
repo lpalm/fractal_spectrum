@@ -215,7 +215,7 @@ final class FrameRenderer {
     let height: Int
     private let g: MTLBuffer
     private let acc: MTLTexture
-    private let tile = 1024
+    private let paced: PacedEncoder
 
     init(engine: Engine, width: Int, height: Int) {
         self.engine = engine
@@ -223,49 +223,30 @@ final class FrameRenderer {
         self.height = height
         g = engine.makeGBuffer(samples: width * height)
         acc = engine.makeAccumulator(width: width, height: height)
+        paced = PacedEncoder(queue: engine.queue)
     }
 
     /// Returns the escape statistics of the first sample.
     func render(scene: FractalScene, color: ColorSettings, samples: Int, into dst: MTLTexture,
                 statsAlpha: Float) -> FSStats {
-        let gpu = engine.gpu
         let size = SIMD2(UInt32(width), UInt32(height))
         var firstSlot: UInt32 = 0
-        var last: MTLCommandBuffer?
         for s in 0..<max(samples, 1) {
-            guard let cb = gpu.queue.makeCommandBuffer(), let setup = cb.makeComputeCommandEncoder() else { break }
             let slot = engine.nextStatsSlot()
             if s == 0 { firstSlot = slot }
             guard let plan = engine.makePlan(scene: scene, grid: .init(width: width, height: height, jitter: Engine.jitter(s)),
-                                             enc: setup, blocking: true, statsSlot: slot) else {
-                setup.endEncoding()
-                cb.commit()
-                break
-            }
-            engine.encodeStatsReset(setup, slot: slot)
-            setup.endEncoding()
-            if let conc = cb.makeComputeCommandEncoder(dispatchType: .concurrent) {
-                for y in stride(from: 0, to: height, by: tile) {
-                    for x in stride(from: 0, to: width, by: tile) {
-                        let w = min(tile, width - x), h = min(tile, height - y)
-                        engine.encodeIterate(conc, plan: plan, gbuf: g, origin: SIMD2(UInt32(x), UInt32(y)),
-                                             size: SIMD2(UInt32(w), UInt32(h)), bufOrigin: .zero, bufStride: UInt32(width))
-                    }
-                }
-                conc.endEncoding()
-            }
-            guard let enc = cb.makeComputeCommandEncoder() else { break }
-            if s == 0 { engine.encodeStatsSmooth(enc, slot: slot, alpha: statsAlpha) }
-            engine.encodeColorize(enc, acc: acc, primary: .init(buffer: g, size: size), fallback: nil, color: color,
+                                             enc: paced.enc, blocking: true, statsSlot: slot) else { break }
+            engine.encodeStatsReset(paced.enc, slot: slot)
+            paced.iterate(engine, plan: plan, gbuf: g, origin: .zero, size: SIMD2(width, height),
+                          bufOrigin: .zero, bufStride: UInt32(width))
+            if s == 0 { engine.encodeStatsSmooth(paced.enc, slot: slot, alpha: statsAlpha) }
+            engine.encodeColorize(paced.enc, acc: acc, primary: .init(buffer: g, size: size), fallback: nil, color: color,
                                   accumulate: s > 0, outSize: size)
             if s == samples - 1 || samples <= 1 {
-                engine.encodePresent(enc, acc: acc, dst: dst, srcSize: size, background: color.interior, size: size)
+                engine.encodePresent(paced.enc, acc: acc, dst: dst, srcSize: size, background: color.interior, size: size)
             }
-            enc.endEncoding()
-            cb.commit()
-            last = cb
         }
-        last?.waitUntilCompleted()
+        paced.sync()
         return engine.readStats(firstSlot)
     }
 }

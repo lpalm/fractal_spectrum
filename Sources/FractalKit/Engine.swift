@@ -8,6 +8,8 @@ import CFractal
 /// Turns scenes into G-buffers (iteration data) and colours; shared by the interactive view and exports.
 public final class Engine: @unchecked Sendable {
     public let gpu = GPU.shared
+    /// Each engine has its own queue so offline renders never wait behind interactive passes or vice versa.
+    public let queue: MTLCommandQueue
     public let palettes: PaletteBank
     public let references = ReferenceStore()
     let stats: MTLBuffer
@@ -19,6 +21,7 @@ public final class Engine: @unchecked Sendable {
 
     public init() {
         let device = gpu.device
+        queue = device.makeCommandQueue()!
         palettes = PaletteBank(device: device)
         stats = device.makeBuffer(length: 256 * MemoryLayout<FSStats>.stride, options: .storageModeShared)!
         assert(MemoryLayout<FSStats>.stride == 32)
@@ -455,7 +458,7 @@ extension Engine {
         let gw = max(width / scale, 16), gh = max(height / scale, 16)
         let g = makeGBuffer(samples: gw * gh)
         for _ in 0..<24 {
-            guard let cb = gpu.queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return }
+            guard let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return }
             let slot = nextStatsSlot()
             guard let plan = makePlan(scene: scene, grid: Grid(width: gw, height: gh), enc: enc, blocking: true,
                                       statsSlot: slot) else {
@@ -504,37 +507,27 @@ extension Engine {
         let tilesX = (o.width + tile - 1) / tile, tilesY = (o.height + tile - 1) / tile
         let total = Double(tilesX * tilesY * o.samples)
         var done = 0.0
+        let paced = PacedEncoder(queue: queue)
         for ty in 0..<tilesY {
             for tx in 0..<tilesX {
                 let x0 = tx * tile, y0 = ty * tile
                 let w = min(tile, o.width - x0), h = min(tile, o.height - y0)
-                var last: MTLCommandBuffer?
+                let size = SIMD2(UInt32(w), UInt32(h))
                 for s in 0..<o.samples {
-                    guard let cb = gpu.queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return nil }
                     let slot = nextStatsSlot()
                     guard let plan = makePlan(scene: scene, grid: Grid(width: o.width, height: o.height, jitter: Engine.jitter(s)),
-                                              enc: enc, blocking: true, statsSlot: slot) else {
-                        enc.endEncoding()
-                        cb.commit()
-                        return nil
-                    }
-                    let origin = SIMD2(UInt32(x0), UInt32(y0))
-                    encodeIterate(enc, plan: plan, gbuf: g, origin: origin, size: SIMD2(UInt32(w), UInt32(h)),
-                                  bufOrigin: origin, bufStride: UInt32(w))
-                    let size = SIMD2(UInt32(w), UInt32(h))
-                    encodeColorize(enc, acc: acc, primary: GSource(buffer: g, size: size),
+                                              enc: paced.enc, blocking: true, statsSlot: slot) else { return nil }
+                    paced.iterate(self, plan: plan, gbuf: g, origin: SIMD2(x0, y0), size: SIMD2(w, h),
+                                  bufOrigin: SIMD2(UInt32(x0), UInt32(y0)), bufStride: UInt32(w))
+                    encodeColorize(paced.enc, acc: acc, primary: GSource(buffer: g, size: size),
                                    fallback: nil, color: color, accumulate: s > 0, outSize: size)
                     if s == o.samples - 1 {
-                        encodePresent(enc, acc: acc, dst: out, srcSize: size, size: size)
+                        encodePresent(paced.enc, acc: acc, dst: out, srcSize: size, size: size)
                     }
-                    enc.endEncoding()
-                    cb.commit()
-                    last = cb
                     done += 1
-                    if s % 4 == 3 { cb.waitUntilCompleted() }
                     if let progress, !progress(done / total) { return nil }
                 }
-                last?.waitUntilCompleted()
+                paced.sync()
                 pixels.withUnsafeMutableBytes { raw in
                     let base = raw.baseAddress!.advanced(by: (y0 * o.width + x0) * 4)
                     out.getBytes(base, bytesPerRow: o.width * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)

@@ -184,8 +184,8 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
             return
         }
         lastWorkNote = "\(work)"
-        guard let cbIter = gpu.queue.makeCommandBuffer(), let encIter = cbIter.makeComputeCommandEncoder(),
-              let cbColor = gpu.queue.makeCommandBuffer(), let encColor = cbColor.makeComputeCommandEncoder() else { return }
+        guard let cbIter = engine.queue.makeCommandBuffer(), let encIter = cbIter.makeComputeCommandEncoder(),
+              let cbColor = engine.queue.makeCommandBuffer(), let encColor = cbColor.makeComputeCommandEncoder() else { return }
         self.cbIter = cbIter
         var iteratedSamples = 0
         var statsSlot: UInt32?
@@ -302,9 +302,13 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         cb.present(drawable)
         cb.addCompletedHandler { [weak self] _ in self?.presentInFlight.signal() }
         cb.commit()
+        // Only camera motion shows the display rate; at rest presents follow refinement passes.
+        if camera.version != presentedCameraVersion {
+            frameTimes.append(now)
+            gpu.noteInteraction()
+        }
         presentedCameraVersion = camera.version
         presentedFrontVersion = frontVersion
-        frameTimes.append(now)
         if recordFrames { frameLog.append((now, lastGpuMs, previewScale)) }
     }
 
@@ -548,7 +552,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         }
     }
 
-    /// Frame rate over the last second of presenting; holds the last value while idle.
+    /// Frame rate over the last second of camera motion; holds the last value at rest.
     private var shownFps = 0.0
     private(set) var frameLog: [(t: Double, gpuMs: Double, scale: Double)] = []
     /// Draw calls whose CPU time exceeded 12 ms, with the kind of work submitted.
