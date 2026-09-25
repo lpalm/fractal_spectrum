@@ -25,8 +25,9 @@ swift build -c release --product fscli
 
 | Input | Action |
 | --- | --- |
-| Drag, two-finger scroll | Pan |
+| Drag, two-finger scroll, arrows | Pan |
 | Scroll wheel, pinch, ⌘-scroll | Zoom at the pointer |
+| + / − | Zoom at the centre |
 | Double-click / right-click | Zoom in / out |
 | Rotate gesture, Q / E | Rotate |
 | Hold ⌥ / ⌥-click | Preview / open the Julia set of the point under the pointer |
