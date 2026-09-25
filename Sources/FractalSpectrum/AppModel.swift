@@ -58,7 +58,7 @@ final class AppModel {
     /// Lets the palette drift slowly ("Animate colours").
     var cycleColors = false
     /// Top zoom speed of flights between places, in doublings per second.
-    var flightSpeed = UserDefaults.standard.object(forKey: "flightSpeed") as? Double ?? 20 {
+    var flightSpeed = UserDefaults.standard.object(forKey: "flightSpeed") as? Double ?? 10 {
         didSet {
             UserDefaults.standard.set(flightSpeed, forKey: "flightSpeed")
             camera.maxZoomSpeed = flightSpeed
