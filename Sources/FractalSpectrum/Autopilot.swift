@@ -45,6 +45,7 @@ final class Autopilot {
         minibrot = nil
         visitedPeriod = 0
         dwellUntil = 0
+        exploreUntil = 0
         searching = false
         session += 1
     }

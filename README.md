@@ -59,3 +59,8 @@ swift build -c release --product fscli
   then full-resolution tiles and jittered anti-aliasing samples at rest.
 - **Colour.** Smooth iteration counts through OKLab-interpolated palettes, relief lighting from the
   distance estimate, colour normalisation that follows the view's iteration range.
+- **Staying interactive.** The iteration limit follows the view but is capped so that even the
+  smallest preview fits a display frame; exports run in short GPU chunks while the view moves.
+- **Autopilot.** Steers by the preview's iteration map towards detailed boundary, away from interior
+  and noise, and in the Mandelbrot set locks onto minibrots found by period detection, Newton's
+  method and size and shape estimates.
