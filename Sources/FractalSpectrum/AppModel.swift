@@ -97,7 +97,6 @@ final class AppModel {
     var toast: String?
     @ObservationIgnored private var toastTask: Task<Void, Never>?
     @ObservationIgnored private var fade: (from: Int, to: Int, t: Double)?
-    @ObservationIgnored private var lastTick = CACurrentMediaTime()
     @ObservationIgnored private var devHooks: DevHooks?
 
     init() {
@@ -186,14 +185,6 @@ final class AppModel {
 
     func removeBookmark(_ place: Location) {
         bookmarks.removeAll { $0.id == place.id }
-        storeBookmarks()
-    }
-
-    func renameBookmark(_ place: Location, to name: String) {
-        guard let i = bookmarks.firstIndex(where: { $0.id == place.id }), !name.isEmpty else { return }
-        let b = bookmarks[i]
-        bookmarks[i] = Location(id: b.id, name: name, formula: b.formula, re: b.re, im: b.im, zoom: b.zoom,
-                                rotation: b.rotation, palette: b.palette, maxIter: b.maxIter)
         storeBookmarks()
     }
 
@@ -383,8 +374,6 @@ final class AppModel {
         show("Coordinates copied")
     }
 
-    // MARK: Per-frame
-
     // MARK: History
 
     /// Records the view once the camera has rested for a moment after moving.
@@ -467,6 +456,8 @@ final class AppModel {
         show("Flying to " + ScaleFact.magnification(z))
         return true
     }
+
+    // MARK: Per-frame
 
     private func tick(_ dt: Double) {
         recordHistory()
