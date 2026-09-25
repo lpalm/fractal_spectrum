@@ -114,7 +114,7 @@ public final class ReferenceOrbit: @unchecked Sendable {
         let extendedPoints = extendedPointsBuffer.contents().assumingMemoryBound(to: FSRefExt.self)
         lock.unlock()
 
-        // the orbit runs until it escapes the scenes' escape radius
+        // the orbit stops once it escapes the escape radius that scenes use
         let bailout = IterationSettings().bailout
         let computed = fs_ref_run(computation, length, points, extendedPoints, bailout * bailout, cancelFlag, progressCounter)
 

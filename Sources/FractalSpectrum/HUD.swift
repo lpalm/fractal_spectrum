@@ -144,7 +144,7 @@ struct TopControls: View {
     }
 }
 
-/// The tour's caption for the place on screen.
+/// Card showing the tour's caption above the status bar.
 struct CaptionCard: View {
     let caption: AppModel.Caption
 
