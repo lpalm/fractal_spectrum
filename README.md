@@ -27,9 +27,9 @@ swift build -c release --product fscli
 | --- | --- |
 | Drag, two-finger scroll | Pan |
 | Scroll wheel, pinch, ⌘-scroll | Zoom at the pointer |
-| Double-click / ⌥ double-click, right-click | Zoom in / out |
+| Double-click / right-click | Zoom in / out |
 | Rotate gesture, Q / E | Rotate |
-| ⌥-click | Julia set of the clicked point |
+| Hold ⌥ / ⌥-click | Preview / open the Julia set of the point under the pointer |
 | T | Guided tour |
 | P | Autopilot: endless dive along intricate boundary detail, stopping at minibrots on the way (, / . for speed) |
 | M | Find the nearest mini-Mandelbrot in view and fly to it |

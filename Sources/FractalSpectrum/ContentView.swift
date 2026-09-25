@@ -28,6 +28,14 @@ struct ContentView: View {
                 .transition(.opacity)
             }
 
+            if let hover = model.juliaHover {
+                GeometryReader { geo in
+                    JuliaInset(hover: hover, formula: model.formula, color: model.color, canvas: geo.size)
+                }
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+            }
+
             VStack {
                 if let t = model.toast {
                     Text(t)
@@ -212,7 +220,7 @@ struct FractalSection: View {
                             .font(.system(size: 13, weight: .semibold, design: .rounded))
                         Text(model.formula.julia
                              ? String(format: "c = %.5f %+.5fi", model.formula.juliaRe, model.formula.juliaIm)
-                             : "⌥-click the set to pick c")
+                             : "Hold ⌥ over the set to preview, click to pick c")
                             .font(.system(size: 11, design: .rounded))
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
@@ -718,10 +726,9 @@ struct HelpOverlay: View {
     private let rows: [(String, String)] = [
         ("Drag / two-finger scroll", "Pan"),
         ("Scroll wheel / pinch / ⌘-scroll", "Zoom at pointer"),
-        ("Double-click / ⌥ double-click", "Zoom in / out"),
-        ("Right-click", "Zoom out"),
+        ("Double-click / right-click", "Zoom in / out"),
         ("Rotate gesture · Q / E", "Rotate"),
-        ("⌥-click", "Julia set at point"),
+        ("Hold ⌥ / ⌥-click", "Preview / open the Julia set at the pointer"),
         ("J", "Toggle Julia set"),
         ("C / X", "Next / previous palette"),
         ("[ / ]", "Halve / double iterations"),

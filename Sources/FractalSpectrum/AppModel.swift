@@ -56,6 +56,8 @@ final class AppModel {
         }
     }
     @ObservationIgnored let pilot: Autopilot
+    /// Julia parameter under the pointer while ⌥ is held over the Mandelbrot set.
+    var juliaHover: JuliaHover?
     var cycleColors = false
     /// Extended dynamic range output on HDR-capable displays.
     var hdr = UserDefaults.standard.object(forKey: "hdr") as? Bool ?? true {
@@ -335,6 +337,7 @@ final class AppModel {
         f.juliaRe = c.re.doubleValue
         f.juliaIm = c.im.doubleValue
         formula = f
+        juliaHover = nil
         camera.jump(to: Viewport.home(for: f))
         renderer.snapColors = true
         show("Julia set for c = \(String(format: "%.5f %+.5fi", f.juliaRe, f.juliaIm))")

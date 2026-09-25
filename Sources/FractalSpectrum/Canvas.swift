@@ -10,6 +10,9 @@ final class FractalMTKView: MTKView {
     private var dragVelocity = SIMD2<Double>(0, 0)
     private var dragging = false
 
+    /// Set by ⌥-scroll zooming, so that the Julia preview stays hidden until ⌥ is released.
+    private var hoverSuppressed = false
+
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
@@ -59,10 +62,45 @@ final class FractalMTKView: MTKView {
 
     private func location(_ e: NSEvent) -> SIMD2<Double> { pixel(convert(e.locationInWindow, from: nil)) }
 
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect],
+                                       owner: self))
+    }
+
+    override func mouseMoved(with e: NSEvent) { updateJuliaHover(option: e.modifierFlags.contains(.option)) }
+
+    override func mouseExited(with e: NSEvent) { model?.juliaHover = nil }
+
+    override func flagsChanged(with e: NSEvent) {
+        super.flagsChanged(with: e)
+        let option = e.modifierFlags.contains(.option)
+        if !option { hoverSuppressed = false }
+        updateJuliaHover(option: option)
+    }
+
+    /// Shows the Julia set of the parameter under the pointer while ⌥ is held over the Mandelbrot set.
+    private func updateJuliaHover(option: Bool) {
+        guard let model, let window else { return }
+        let p = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        guard option, !hoverSuppressed, model.formula.family == .mandelbrot, !model.formula.julia, bounds.contains(p) else {
+            if model.juliaHover != nil { model.juliaHover = nil }
+            return
+        }
+        let (w, h) = pixelSize
+        let c = model.camera.view.point(atPixel: pixel(p), width: w, height: h, flipY: false)
+        model.juliaHover = JuliaHover(point: CGPoint(x: p.x, y: bounds.height - p.y), re: c.re.doubleValue, im: c.im.doubleValue)
+    }
+
     override func scrollWheel(with e: NSEvent) {
         guard let model else { return }
         let (w, h) = pixelSize
         let zoomModifier = e.modifierFlags.contains(.command) || e.modifierFlags.contains(.option)
+        if e.modifierFlags.contains(.option) {
+            hoverSuppressed = true
+            model.juliaHover = nil
+        }
         if e.hasPreciseScrollingDeltas && !zoomModifier {
             // trackpad: two-finger scroll pans, momentum included
             model.camera.pan(pixels: SIMD2(Double(e.scrollingDeltaX), Double(e.scrollingDeltaY)) * scale, width: w, height: h)

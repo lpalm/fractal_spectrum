@@ -214,15 +214,15 @@ public final class Exporter: @unchecked Sendable {
 
 /// Renders complete frames (all samples, all tiles) into a texture, keeping colour statistics
 /// smoothed across frames.
-final class FrameRenderer {
+public final class FrameRenderer {
     let engine: Engine
-    let width: Int
-    let height: Int
+    public let width: Int
+    public let height: Int
     private let g: MTLBuffer
     private let acc: MTLTexture
     private let paced: PacedEncoder
 
-    init(engine: Engine, width: Int, height: Int) {
+    public init(engine: Engine, width: Int, height: Int) {
         self.engine = engine
         self.width = width
         self.height = height
@@ -232,7 +232,8 @@ final class FrameRenderer {
     }
 
     /// Returns the escape statistics of the first sample.
-    func render(scene: FractalScene, color: ColorSettings, samples: Int, into dst: MTLTexture,
+    @discardableResult
+    public func render(scene: FractalScene, color: ColorSettings, samples: Int, into dst: MTLTexture,
                 statsAlpha: Float) -> FSStats {
         let size = SIMD2(UInt32(width), UInt32(height))
         var firstSlot: UInt32 = 0

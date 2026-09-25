@@ -87,6 +87,10 @@ final class DevHooks {
                 try? text.write(toFile: arg, atomically: true, encoding: .utf8)
             }
         case "where": try? model.coordinatesText.write(toFile: arg, atomically: true, encoding: .utf8)
+        case "hover":
+            // hover:x,y,re,im shows the Julia preview as if ⌥ were held at canvas point (x, y); hover:off hides it
+            let v = arg.split(separator: ",").compactMap { Double($0) }
+            model.juliaHover = v.count == 4 ? JuliaHover(point: CGPoint(x: v[0], y: v[1]), re: v[2], im: v[3]) : nil
         case "settled":
             // writes "1" to the given file once the view is fully refined
             waitSettled(then: { try? "1".write(toFile: arg, atomically: true, encoding: .utf8) })
