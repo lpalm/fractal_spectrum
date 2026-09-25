@@ -60,13 +60,23 @@ struct OrbitOverlay: View {
                              with: .color(i == 0 ? .orange : .white.opacity(0.25 + 0.75 * pow(0.985, Double(i)))))
                 }
             }
-            Text(orbit.summary)
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .panelGlass(in: Capsule())
-                .fixedSize()
-                .offset(x: orbit.pointer.x + 16, y: orbit.pointer.y + 14)
+            GeometryReader { canvas in
+                // beside the pointer: on its left in the right third, above it near the bottom
+                let p = orbit.pointer, size = canvas.size
+                let right = p.x < size.width * 0.7, below = p.y < size.height - 60
+                Text(orbit.summary)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .panelGlass(in: Capsule())
+                    .fixedSize()
+                    .padding(.leading, right ? p.x + 16 : 0)
+                    .padding(.trailing, right ? 0 : size.width - p.x + 16)
+                    .padding(.top, below ? p.y + 14 : 0)
+                    .padding(.bottom, below ? 0 : size.height - p.y + 14)
+                    .frame(width: size.width, height: size.height,
+                           alignment: Alignment(horizontal: right ? .leading : .trailing, vertical: below ? .top : .bottom))
+            }
         }
     }
 }
