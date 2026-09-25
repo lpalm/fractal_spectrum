@@ -11,6 +11,7 @@ struct FractalSpectrumApp: App {
         WindowGroup("Spectrum") {
             ContentView(model: model)
                 .frame(minWidth: 960, minHeight: 620)
+                .onAppear { delegate.model = model }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1560, height: 980)
@@ -62,6 +63,8 @@ struct FractalSpectrumApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    weak var model: AppModel?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.appearance = NSAppearance(named: .darkAqua)
         NSApp.setActivationPolicy(.regular)
@@ -69,4 +72,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    /// Quitting would abandon a running export: ask first, and on quit let the export cancel
+    /// (removing its partly written file) before terminating.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        MainActor.assumeIsolated {
+            guard let export = model?.export, export.running else { return .terminateNow }
+            let alert = NSAlert()
+            alert.messageText = "An export is still running"
+            alert.informativeText = "Quitting now cancels it."
+            alert.addButton(withTitle: "Keep Exporting")
+            alert.addButton(withTitle: "Quit")
+            guard alert.runModal() == .alertSecondButtonReturn else { return .terminateCancel }
+            export.onFinish = { NSApp.reply(toApplicationShouldTerminate: true) }
+            export.cancel()
+            return .terminateLater
+        }
+    }
 }

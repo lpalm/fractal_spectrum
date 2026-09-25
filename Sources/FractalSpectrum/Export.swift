@@ -53,6 +53,8 @@ final class ExportController {
     var preview: NSImage?
     var status = ""
     var lastOutput: URL?
+    /// Called once when the running export ends.
+    @ObservationIgnored var onFinish: (() -> Void)?
     @ObservationIgnored private let cancelToken = CancelToken()
     @ObservationIgnored private var started = Date()
 
@@ -149,6 +151,8 @@ final class ExportController {
         running = false
         status = message
         if let url { lastOutput = url }
+        onFinish?()
+        onFinish = nil
     }
 }
 

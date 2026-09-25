@@ -76,6 +76,7 @@ final class DevHooks {
             model.export.duration = 6
             model.export.videoSamples = 1
             model.export.exportVideo(model: model, to: URL(fileURLWithPath: arg))
+        case "export-cancel": model.export.cancel()
         case "export-status":
             let e = model.export
             try? "running=\(e.running) progress=\(e.progress) status=\(e.status)".write(toFile: arg, atomically: true, encoding: .utf8)
