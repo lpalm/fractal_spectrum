@@ -475,13 +475,20 @@ extension Engine {
             cb.waitUntilCompleted()
             guard scene.iter.autoIterations else { return }
             let s = readStats(slot)
-            let next = IterationTuner.adjust(maxIter: scene.iter.maxIter, stats: s, samples: gw * gh)
+            let samples = gw * gh
+            var next = IterationTuner.adjust(maxIter: scene.iter.maxIter, stats: s, samples: samples)
+            let ms = (cb.gpuEndTime - cb.gpuStartTime) * 1000
+            if next > scene.iter.maxIter, IterationTuner.grownCost(ms, stats: s, samples: samples, maxIter: scene.iter.maxIter,
+                                                                    next: next) * 1000 / Double(samples) > IterationTuner.offlineMicrosPerSample {
+                next = scene.iter.maxIter
+            }
             if Engine.traceTuning {
-                print("tune maxIter \(scene.iter.maxIter): esc \(s.escaped) late \(s.lateEscaped) unresolved \(s.unresolved) interior \(s.interior) hi \(s.maxIter) of \(gw * gh) -> \(next)")
+                print("tune maxIter \(scene.iter.maxIter): esc \(s.escaped) late \(s.lateEscaped) unresolved \(s.unresolved) interior \(s.interior) hi \(s.maxIter) of \(samples) \(String(format: "%.1f", ms)) ms -> \(next)")
             }
             if next == scene.iter.maxIter { return }
+            let lowered = next < scene.iter.maxIter
             scene.iter.maxIter = next
-            if next < scene.iter.maxIter { return }
+            if lowered { return }
         }
     }
 
@@ -559,6 +566,17 @@ extension Engine {
 public enum IterationTuner {
     public static let floor = 1000
     public static let ceiling = 100_000_000
+    /// Offline renders raise the limit only while a sample costs less than this many GPU µs on
+    /// average (about four times the interactive view's budget).
+    public static let offlineMicrosPerSample = 1.6
+
+    /// Cost of a pass after raising the limit from `maxIter` to `next`: unresolved samples run to the
+    /// new limit, the others cost the same.
+    public static func grownCost(_ cost: Double, stats s: FSStats, samples: Int, maxIter: Int, next: Int) -> Double {
+        let n = Double(max(samples, 1))
+        let mean = max(Double(s.iterations) / n, 1)
+        return cost * (mean + Double(s.unresolved) / n * Double(next - maxIter)) / mean
+    }
 
     /// Doubles the limit while a noticeable share of samples is still unresolved (hit the limit
     /// without escaping or showing an attracting cycle) and escapes still happen near the limit;

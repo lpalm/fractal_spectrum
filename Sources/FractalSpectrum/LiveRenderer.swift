@@ -108,7 +108,9 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     private var surfaceGeneration = 0
 
     // Timing
-    private var costMsPerMSample = 20.0
+    /// Pessimistic until measured: the first view may be arbitrarily expensive (e.g. a restored session).
+    private var costMsPerMSample = 500.0
+    private var costMeasured = false
     private var tailMs = 1.0
     private var cbIter: MTLCommandBuffer?
     private var tileEncoder: MTLComputeCommandEncoder?
@@ -255,7 +257,9 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
                     // (possible) interior: detected cycles or samples stuck at the limit.
                     self.interiorLikely = Double(st.interior + st.unresolved) > Double(samples) * 0.002
                     if ms > 0.5 { self.iterationRate = self.iterationRate * 0.7 + Double(st.iterations) / (ms / 1000) * 0.3 }
-                    if sceneAtEncode == self.sceneVersion { self.consider(stats: st, samples: samples) }
+                    if sceneAtEncode == self.sceneVersion {
+                        self.consider(stats: st, samples: samples, fullFrameMs: ms * Double(totalSamples) / Double(max(samples, 1)))
+                    }
                 }
             }
         }
@@ -528,24 +532,37 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         let n = Double(samples) / 1e6
         if samples > total / 3 {
             let c = max(ms - tailMs, 0.01) / n
-            costMsPerMSample = costMsPerMSample * 0.5 + c * 0.5
+            costMsPerMSample = costMeasured ? costMsPerMSample * 0.5 + c * 0.5 : c
+            costMeasured = true
         } else {
+            // Until a large pass has measured it, small passes bound the per-sample cost from above.
+            if !costMeasured { costMsPerMSample = min(costMsPerMSample, max(ms, 0.01) / n) }
             let tail = max(ms - costMsPerMSample * n, 0)
             tailMs = tailMs * 0.7 + tail * 0.3
         }
     }
 
-    /// Applies the tuner's proposal. While the camera moves, increases are rate-limited: every pass
-    /// sees a different view, and unthrottled doubling would multiply the cost of each next preview.
-    private func consider(stats: FSStats, samples: Int) {
+    /// Applies the tuner's proposal, keeping a full frame under about 0.6 s so that even the smallest
+    /// preview fits the frame budget; above 1.2 s the limit is lowered. `fullFrameMs` is
+    /// scaled from the pass, so it errs high for small, tail-dominated passes. While the camera moves,
+    /// increases are rate-limited: every pass sees a different view, and unthrottled doubling would
+    /// multiply the cost of each next preview.
+    private func consider(stats: FSStats, samples: Int, fullFrameMs: Double) {
         guard iter.autoIterations else { return }
         var next = IterationTuner.adjust(maxIter: iter.maxIter, stats: stats, samples: samples)
-        // Keep the view interactive: no automatic increase once a full frame would take ~0.6 s.
-        let fullFrameMs = tailMs + costMsPerMSample * Double(size.x * size.y) / 1e6
-        if next > iter.maxIter && fullFrameMs > 600 { next = iter.maxIter }
+        var overBudget = false
+        if fullFrameMs > 1200 {
+            let affordable = Int(Double(iter.maxIter) * max(1.0 / 16, 600 / fullFrameMs))
+            next = min(next, iter.maxIter, max(IterationTuner.floor, affordable))
+            overBudget = next < iter.maxIter
+        } else if next > iter.maxIter,
+                  IterationTuner.grownCost(fullFrameMs, stats: stats, samples: samples, maxIter: iter.maxIter, next: next) > 600 {
+            next = iter.maxIter
+        }
         let now = CACurrentMediaTime()
         let moving = camera.isAnimating
-        let wait = next > iter.maxIter ? (moving ? 0.4 : 0.0) : 1.5
+        // Passes encoded before a change are ignored (scene version), so an over-budget cut needs no delay.
+        let wait = overBudget ? 0 : next > iter.maxIter ? (moving ? 0.4 : 0.0) : 1.5
         if next != iter.maxIter && now - lastIterChange > wait {
             lastIterChange = now
             onIterationProposal?(next)

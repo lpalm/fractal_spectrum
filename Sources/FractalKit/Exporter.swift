@@ -170,12 +170,17 @@ public final class Exporter: @unchecked Sendable {
             CVMetalTextureCacheCreateTextureFromImage(nil, cache, pixelBuffer, nil, .bgra8Unorm, job.width, job.height, 0, &cvTex)
             guard let cvTex, let texture = CVMetalTextureGetTexture(cvTex) else { throw CocoaError(.fileWriteUnknown) }
 
+            let started = ProcessInfo.processInfo.systemUptime
             let stats = renderer.render(scene: scene, color: color, samples: job.samples, into: texture,
                                         statsAlpha: f == 0 ? 1 : 0.35)
+            let ms = (ProcessInfo.processInfo.systemUptime - started) * 1000
             // iterations only ever grow during a zoom-in, so colours never jump back
-            let next = IterationTuner.adjust(maxIter: iter.maxIter, stats: stats, samples: job.width * job.height)
-            if next > iter.maxIter { iter.maxIter = next }
-            iter.maxIter = max(iter.maxIter, scene.iter.maxIter)
+            let pixels = job.width * job.height
+            let next = IterationTuner.adjust(maxIter: iter.maxIter, stats: stats, samples: pixels)
+            if next > iter.maxIter, IterationTuner.grownCost(ms, stats: stats, samples: pixels, maxIter: iter.maxIter, next: next)
+                * 1000 / Double(pixels * max(job.samples, 1)) <= IterationTuner.offlineMicrosPerSample {
+                iter.maxIter = next
+            }
 
             while !input.isReadyForMoreMediaData { Thread.sleep(forTimeInterval: 0.002) }
             adaptor.append(pixelBuffer, withPresentationTime: CMTime(value: CMTimeValue(f), timescale: CMTimeScale(job.fps)))
