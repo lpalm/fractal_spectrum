@@ -103,6 +103,9 @@ final class DevHooks {
             // hover:x,y,re,im shows the Julia preview as if ⌥ were held at canvas point (x, y); hover:off hides it
             let v = arg.split(separator: ",").compactMap { Double($0) }
             model.juliaHover = v.count == 4 ? JuliaHover(point: CGPoint(x: v[0], y: v[1]), re: v[2], im: v[3]) : nil
+        case "windows":
+            let lines = NSApp.windows.map { "\(type(of: $0)) visible=\($0.isVisible) key=\($0.isKeyWindow) frame=\($0.frame) content=\($0.contentView.map { "\(type(of: $0))" } ?? "-")" }
+            try? lines.joined(separator: "\n").write(toFile: arg, atomically: true, encoding: .utf8)
         case "settled":
             // writes "1" to the given file once the view is fully refined
             waitSettled(then: { try? "1".write(toFile: arg, atomically: true, encoding: .utf8) })
