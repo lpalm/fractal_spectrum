@@ -28,6 +28,8 @@ struct FractalSpectrumApp: App {
                     model.showExport = true
                 }
                 .keyboardShortcut("e", modifiers: .command)
+                Button(model.recordingSince == nil ? "Start Recording" : "Stop Recording") { model.toggleRecording() }
+                    .keyboardShortcut("r", modifiers: .command)
             }
             CommandGroup(after: .pasteboard) {
                 Button("Copy Image") { model.copyImage() }.keyboardShortcut("c", modifiers: [.command, .option])
@@ -73,20 +75,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
-    /// Quitting would abandon a running export: ask first, and on quit let the export cancel
-    /// (removing its partly written file) before terminating.
+    /// Quitting finishes a recording (keeping it) and would abandon a running export: after asking,
+    /// the export is cancelled (removing its partly written file) before the app terminates.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         MainActor.assumeIsolated {
-            guard let export = model?.export, export.running else { return .terminateNow }
-            let alert = NSAlert()
-            alert.messageText = "An export is still running"
-            alert.informativeText = "Quitting now cancels it."
-            alert.addButton(withTitle: "Keep Exporting")
-            alert.addButton(withTitle: "Quit")
-            guard alert.runModal() == .alertSecondButtonReturn else { return .terminateCancel }
-            export.onFinish = { NSApp.reply(toApplicationShouldTerminate: true) }
-            export.cancel()
+            guard let model, model.recordingSince != nil || model.export.running else { return .terminateNow }
+            model.stopRecording { self.confirmExport(of: model) }
             return .terminateLater
         }
+    }
+
+    @MainActor private func confirmExport(of model: AppModel) {
+        let export = model.export
+        guard export.running else {
+            NSApp.reply(toApplicationShouldTerminate: true)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "An export is still running"
+        alert.informativeText = "Quitting now cancels it."
+        alert.addButton(withTitle: "Keep Exporting")
+        alert.addButton(withTitle: "Quit")
+        guard alert.runModal() == .alertSecondButtonReturn else {
+            NSApp.reply(toApplicationShouldTerminate: false)
+            return
+        }
+        export.onFinish = { NSApp.reply(toApplicationShouldTerminate: true) }
+        export.cancel()
     }
 }

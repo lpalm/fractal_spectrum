@@ -560,6 +560,16 @@ struct HUDBar: View {
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .foregroundStyle(Color.accentColor)
             }
+            if let since = model.recordingSince {
+                divider
+                TimelineView(.periodic(from: since, by: 1)) { t in
+                    let s = Int(t.date.timeIntervalSince(since))
+                    Label(String(format: "%d:%02d", s / 60, s % 60), systemImage: "record.circle.fill")
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.red)
+                }
+            }
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
@@ -751,6 +761,7 @@ struct HelpOverlay: View {
         ("Space", "Hide interface"),
         ("⇧⌘C / ⌘L", "Copy / go to coordinates"),
         ("⌥⌘C", "Copy image"),
+        ("⌘R", "Record the view to a movie"),
         ("⌘[ / ⌘]", "Back / forward through visited views"),
     ]
 

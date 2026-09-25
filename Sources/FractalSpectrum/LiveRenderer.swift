@@ -35,6 +35,10 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     var onIterationProposal: ((Int) -> Void)?
     /// Called at the start of every display frame with the elapsed time.
     var onFrame: ((Double) -> Void)?
+    /// Receives every presented frame while set; setting one presents at once, so it gets a first frame.
+    var recorder: LiveRecorder? { didSet { presentedFrontVersion = -1 } }
+    /// Called when the drawable changes size while recording (the movie's size is fixed).
+    var onRecordingInterrupted: (() -> Void)?
 
     /// Coarse copy of the latest preview's escape iterations, for steering the autopilot.
     struct Probe {
@@ -290,24 +294,36 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     private func present(in view: MTKView, now: Double) {
         guard display.count == 2, let fv = frontView else { return }
         guard camera.version != presentedCameraVersion || frontVersion != presentedFrontVersion else { return }
+        // A hidden window is not drawn, but a recording still receives frames.
         let visible = view.window?.occlusionState.contains(.visible) ?? false
-        guard visible, presentInFlight.wait(timeout: .now()) == .success else { return }
-        guard let layer = view.layer as? CAMetalLayer, let drawable = layer.nextDrawable(),
-              let cb = presentQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else {
+        guard visible || recorder != nil, presentInFlight.wait(timeout: .now()) == .success else { return }
+        let drawable = visible ? (view.layer as? CAMetalLayer)?.nextDrawable() : nil
+        guard drawable != nil || !visible, let cb = presentQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else {
             presentInFlight.signal()
             return
         }
         let rep = camera.view.reprojection(from: fv, width: size.x, height: size.y, flipY: camera.flipY)
         let sz = SIMD2(UInt32(size.x), UInt32(size.y))
-        let hdr = drawable.texture.pixelFormat == .rgba16Float ? hdrHeadroom : nil
-        engine.encodePresent(enc, acc: display[front], dst: drawable.texture, reprojection: rep, srcSize: sz,
-                             background: color.interior, size: sz, hdrHeadroom: hdr)
+        if let drawable {
+            let hdr = drawable.texture.pixelFormat == .rgba16Float ? hdrHeadroom : nil
+            engine.encodePresent(enc, acc: display[front], dst: drawable.texture, reprojection: rep, srcSize: sz,
+                                 background: color.interior, size: sz, hdrHeadroom: hdr)
+        }
+        let rec = recorder
+        let frame = rec?.nextFrame()
+        if let rec, let frame, let tex = CVMetalTextureGetTexture(frame.texture) {
+            engine.encodePresent(enc, acc: display[front], dst: tex, reprojection: rep, srcSize: sz,
+                                 background: color.interior, size: SIMD2(UInt32(rec.width), UInt32(rec.height)))
+        }
         enc.endEncoding()
-        cb.present(drawable)
-        cb.addCompletedHandler { [weak self] _ in self?.presentInFlight.signal() }
+        if let drawable { cb.present(drawable) }
+        cb.addCompletedHandler { [weak self] _ in
+            self?.presentInFlight.signal()
+            if let rec, let frame { withExtendedLifetime(frame.texture) { rec.append(frame.buffer, at: now) } }
+        }
         cb.commit()
         // Only camera motion shows the display rate; at rest presents follow refinement passes.
-        if camera.version != presentedCameraVersion {
+        if drawable != nil, camera.version != presentedCameraVersion {
             frameTimes.append(now)
             gpu.noteInteraction()
         }
@@ -347,6 +363,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     // MARK: Passes
 
     private func resize(_ sz: SIMD2<Int>) {
+        if recorder != nil { onRecordingInterrupted?() }
         size = sz
         surfaceGeneration += 1
         let n = sz.x * sz.y

@@ -60,6 +60,8 @@ final class AppModel {
     var juliaHover: JuliaHover?
     /// Orbit of the point under the pointer while ⇧ is held.
     var orbitHover: OrbitHover?
+    /// Start of the live recording in progress (⌘R).
+    var recordingSince: Date?
     var cycleColors = false
     /// Extended dynamic range output on HDR-capable displays.
     var hdr = UserDefaults.standard.object(forKey: "hdr") as? Bool ?? true {
@@ -112,6 +114,9 @@ final class AppModel {
         renderer.color = color
         renderer.aaSamples = quality.samples
         renderer.onStatus = { [weak self] s in MainActor.assumeIsolated { self?.status = s } }
+        renderer.onRecordingInterrupted = { [weak self] in
+            MainActor.assumeIsolated { self?.stopRecording(note: "Recording stopped: the window changed size") }
+        }
         renderer.onIterationProposal = { [weak self] n in MainActor.assumeIsolated { self?.iter.maxIter = n } }
         engine.references.onUpdate = { [weak self] in
             MainActor.assumeIsolated { self?.renderer.invalidate() }
@@ -389,6 +394,43 @@ final class AppModel {
         let v = camera.view
         let digits = Int(v.zoomLog10) + 10
         return "re: \(v.center.re.string(digits: digits))\nim: \(v.center.im.string(digits: digits))\nzoom: \(v.zoomText)"
+    }
+
+    // MARK: Recording
+
+    func toggleRecording() {
+        if recordingSince == nil { startRecording() } else { stopRecording() }
+    }
+
+    /// Records the canvas as shown (without the interface) to a movie, by default in the Movies folder.
+    func startRecording(to file: URL? = nil) {
+        let dir = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
+        let url = file ?? dir.appendingPathComponent(ExportController.defaultName("Spectrum Recording", "mp4"))
+        do {
+            renderer.recorder = try LiveRecorder(url: url, drawable: renderer.drawableSizeForPicking)
+            recordingSince = Date()
+            show("Recording · ⌘R to stop")
+        } catch {
+            show("Recording failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Finishes the movie; `then` runs once it is written.
+    func stopRecording(note: String? = nil, then: (@MainActor () -> Void)? = nil) {
+        guard let rec = renderer.recorder else {
+            then?()
+            return
+        }
+        renderer.recorder = nil
+        recordingSince = nil
+        rec.finish { ok in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.show(note ?? (ok ? "Saved \(rec.url.lastPathComponent)" : "Recording failed"), duration: 3)
+                    then?()
+                }
+            }
+        }
     }
 
     /// Puts the view as shown (at the canvas resolution) on the pasteboard.

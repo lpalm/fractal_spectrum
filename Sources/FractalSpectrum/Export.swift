@@ -77,15 +77,15 @@ final class ExportController {
     private static func askForURL(type: UTType, ext: String, in dir: FileManager.SearchPathDirectory) -> URL? {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [type]
-        panel.nameFieldStringValue = defaultName(ext)
+        panel.nameFieldStringValue = defaultName("Spectrum", ext)
         panel.directoryURL = FileManager.default.urls(for: dir, in: .userDomainMask).first
         return panel.runModal() == .OK ? panel.url : nil
     }
 
-    private static func defaultName(_ ext: String) -> String {
+    static func defaultName(_ prefix: String, _ ext: String) -> String {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
-        return "Spectrum \(f.string(from: Date())).\(ext)"
+        return "\(prefix) \(f.string(from: Date())).\(ext)"
     }
 
     func exportImage(model: AppModel, to preset: URL? = nil) {

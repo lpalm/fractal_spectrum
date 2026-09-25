@@ -44,6 +44,7 @@ swift build -c release --product fscli
 | ⌘[ / ⌘] | Back / forward through visited views |
 | ⇧⌘C / ⌘L | Copy / go to coordinates |
 | ⌥⌘C | Copy image |
+| ⌘R | Record the view (without the interface) to a movie |
 
 ## How it works
 
