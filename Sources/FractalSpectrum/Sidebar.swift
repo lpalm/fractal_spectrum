@@ -232,14 +232,14 @@ struct PlacesSection: View {
                     Text("Flight speed")
                         .font(.rounded(12, .medium))
                     Spacer()
-                    Text("\(Int(model.flightSpeed)) doublings a second")
+                    Text(model.flightSpeed == 1 ? "1 doubling a second" : "\(Int(model.flightSpeed)) doublings a second")
                         .font(.rounded(11))
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                 }
                 // logarithmic, like the zoom itself
                 Slider(value: Binding(get: { log(model.flightSpeed) }, set: { model.flightSpeed = exp($0).rounded() }),
-                       in: log(5)...log(100))
+                       in: 0...log(100))
                     .controlSize(.small)
             }
             .padding(.top, 4)
