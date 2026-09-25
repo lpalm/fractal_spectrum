@@ -67,10 +67,11 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .onAppear {
             for f in FractalFamily.allCases {
-                thumbs.requestFamily(Formula(family: f), color: model.color)
+                var c = ColorSettings()
+                c.palette = [.mandelbrot: 0, .tricorn: 4, .burningShip: 7, .celtic: 2][f] ?? 0
+                thumbs.requestFamily(Formula(family: f), color: c)
             }
-            thumbs.requestFamily(Formula(family: .mandelbrot, power: 3), color: model.color)
-            for l in Location.all { thumbs.requestLocation(l, color: model.color) }
+            for l in Location.all { thumbs.requestLocation(l, color: ColorSettings()) }
         }
     }
 }
@@ -115,6 +116,51 @@ struct Sidebar: View {
     }
 }
 
+/// Sidebar section whose expanded state persists across launches.
+struct CollapsibleSection<Content: View>: View {
+    let title: String
+    var trailing: AnyView? = nil
+    @AppStorage private var expanded: Bool
+    @ViewBuilder let content: () -> Content
+
+    init(_ title: String, id: String, expandedByDefault: Bool = true, trailing: AnyView? = nil,
+         @ViewBuilder content: @escaping () -> Content) {
+        self.title = title
+        self.trailing = trailing
+        _expanded = AppStorage(wrappedValue: expandedByDefault, "section.\(id)")
+        self.content = content
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Button {
+                    withAnimation(.spring(duration: 0.35)) { expanded.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .bold))
+                            .rotationEffect(.degrees(expanded ? 90 : 0))
+                            .foregroundStyle(.tertiary)
+                        Text(title.uppercased())
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .tracking(1.2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                if expanded { trailing }
+            }
+            if expanded {
+                content()
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+    }
+}
+
 struct SectionHeader: View {
     let title: String
     var trailing: AnyView? = nil
@@ -138,8 +184,7 @@ struct FractalSection: View {
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SectionHeader(title: "Fractal")
+        CollapsibleSection("Fractal", id: "fractal") {
             LazyVGrid(columns: columns, spacing: 10) {
                 ForEach(FractalFamily.allCases) { f in
                     let key = "family-\(f.rawValue)-2"
@@ -232,42 +277,47 @@ struct Tile: View {
 struct LocationsSection: View {
     @Bindable var model: AppModel
     let thumbs: Thumbnails
+    private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            SectionHeader(title: "Explore", trailing: AnyView(
-                Button { model.addBookmark() } label: {
-                    Label("Save view", systemImage: "plus")
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
-                }
-                .buttonStyle(.glass)
-                .controlSize(.small)
-                .help("Save the current view to Your Places (B)")
-            ))
+        CollapsibleSection("Explore", id: "explore", trailing: AnyView(
+            Button { model.addBookmark() } label: {
+                Label("Save view", systemImage: "plus")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+            }
+            .buttonStyle(.glass)
+            .controlSize(.small)
+            .help("Save the current view to Your Places (B)")
+        )) {
             if !model.bookmarks.isEmpty {
                 Text("Your Places")
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
                     .foregroundStyle(.tertiary)
-                ForEach(model.bookmarks) { l in
-                    LocationRow(location: l, image: thumbs.image("loc-\(l.id)")) { model.fly(to: l) }
-                        .contextMenu {
-                            Button("Remove", role: .destructive) { model.removeBookmark(l) }
-                        }
-                        .onAppear { thumbs.requestLocation(l, color: model.color) }
+                LazyVGrid(columns: columns, spacing: 10) {
+                    ForEach(model.bookmarks) { l in
+                        PlaceTile(location: l, image: thumbs.image("loc-\(l.id)")) { model.fly(to: l) }
+                            .contextMenu {
+                                Button("Remove", role: .destructive) { model.removeBookmark(l) }
+                            }
+                            .onAppear { thumbs.requestLocation(l, color: model.color) }
+                    }
                 }
                 Text("Curated")
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
                     .foregroundStyle(.tertiary)
                     .padding(.top, 4)
             }
-            ForEach(Location.all) { l in
-                LocationRow(location: l, image: thumbs.image("loc-\(l.id)")) { model.fly(to: l) }
+            LazyVGrid(columns: columns, spacing: 10) {
+                ForEach(Location.all) { l in
+                    PlaceTile(location: l, image: thumbs.image("loc-\(l.id)")) { model.fly(to: l) }
+                }
             }
         }
     }
 }
 
-struct LocationRow: View {
+/// Thumbnail tile of a place with its name and magnification.
+struct PlaceTile: View {
     let location: Location
     let image: NSImage?
     let action: () -> Void
@@ -275,36 +325,46 @@ struct LocationRow: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.black.opacity(0.35))
+            VStack(alignment: .leading, spacing: 4) {
+                ZStack(alignment: .bottomTrailing) {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.black.opacity(0.35))
                     if let image {
-                        Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+                        Image(nsImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .transition(.opacity)
+                    } else {
+                        ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
+                    Text(location.depthText)
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.black.opacity(0.55), in: Capsule())
+                        .padding(5)
                 }
-                .frame(width: 64, height: 40)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(location.name)
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    Text(location.formula.displayName)
-                        .font(.system(size: 11, design: .rounded))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Text(location.depthText)
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(Color.white.opacity(0.08), in: Capsule())
+                .frame(height: 76)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Color.white.opacity(hover ? 0.35 : 0.08), lineWidth: 1))
+                .scaleEffect(hover ? 1.03 : 1)
+                Text(location.name)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+                Text(location.formula.displayName)
+                    .font(.system(size: 10, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
-            .padding(6)
-            .background(hover ? Color.white.opacity(0.07) : .clear, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
+        .animation(.easeOut(duration: 0.15), value: hover)
+        .animation(.easeOut(duration: 0.3), value: image != nil)
+        .help(location.name + " · " + ScaleFact.magnification(location.zoom))
     }
 }
 
@@ -313,8 +373,7 @@ struct ColorSection: View {
     private let columns = [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SectionHeader(title: "Colour")
+        CollapsibleSection("Colour", id: "colour") {
             LazyVGrid(columns: columns, spacing: 8) {
                 ForEach(Palette.all) { p in
                     Button { model.setPalette(p.id) } label: {
@@ -357,8 +416,7 @@ struct QualitySection: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SectionHeader(title: "Quality")
+        CollapsibleSection("Quality", id: "quality") {
             Picker("", selection: $model.quality) {
                 ForEach(Quality.allCases) { q in Text(q.rawValue).tag(q) }
             }
@@ -392,8 +450,7 @@ struct ExportSection: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SectionHeader(title: "Export")
+        CollapsibleSection("Export", id: "export") {
             HStack(spacing: 8) {
                 Button {
                     model.export.kind = .image
