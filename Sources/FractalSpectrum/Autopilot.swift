@@ -224,8 +224,8 @@ final class Autopilot {
                                                  excluding visited: Int) -> FoundMinibrot? {
         for start in starts {
             guard let found = Minibrot.locate(near: start, searchLog2Radius: view.log2Radius - 8,
-                                              viewLog2Radius: view.log2Radius, maxPeriod: 1_000_000),
-                  found.period != visited, found.cardioid, found.log2Size.isFinite, found.log2Size < view.log2Radius - 3,
+                                              viewLog2Radius: view.log2Radius, maxPeriod: 1_000_000, excludedPeriod: visited),
+                  found.cardioid, found.log2Size.isFinite, found.log2Size < view.log2Radius - 3,
                   found.nucleus.minus(view.center).log2Abs < view.log2Radius else { continue }
             // the body's middle: nucleus + scale * (-0.6), scale = 2^log2Size e^(i angle)
             let scale = FloatExp.fromLog2(found.log2Size)

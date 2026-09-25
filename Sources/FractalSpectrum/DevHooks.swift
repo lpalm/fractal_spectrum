@@ -69,21 +69,18 @@ final class DevHooks {
             }
         case "speed": model.autopilot.speed = Double(argument) ?? model.autopilot.speed
         case "export-image":
-            // export-image:<path> renders a quick 4K image there (the user's remembered settings are put
-            // back once the job has taken them); export-image: saves to the image folder as set up
-            let export = model.export
-            guard !argument.isEmpty else { return export.exportImage(model: model) }
-            let (size, samples) = (export.imageSize, export.imageSamples)
-            (export.imageSize, export.imageSamples) = (ExportController.imageSizes[0], 4)
-            export.exportImage(model: model, to: URL(fileURLWithPath: argument))
-            (export.imageSize, export.imageSamples) = (size, samples)
+            // export-image:<path> renders a quick 4K image there; export-image: saves one to the image
+            // folder as set up in the export sheet
+            var job = model.export.imageJob(model: model)
+            guard !argument.isEmpty else { return model.export.render(job) }
+            (job.width, job.height, job.samples) = (3840, 2160, 4)
+            model.export.render(job, to: URL(fileURLWithPath: argument))
         case "export-video":
-            // export-video:<path> renders a quick 6-second 1080p video there
-            let export = model.export
-            let (size, fps, samples) = (export.videoSize, export.fps, export.videoSamples)
-            (export.videoSize, export.fps, export.duration, export.videoSamples) = (ExportController.videoSizes[0], 30, 6, 1)
-            export.exportVideo(model: model, to: URL(fileURLWithPath: argument))
-            (export.videoSize, export.fps, export.videoSamples) = (size, fps, samples)
+            // export-video:<path> renders a quick 6-second 1080p HEVC video there
+            var job = model.export.videoJob(model: model)
+            (job.width, job.height, job.fps, job.duration, job.samples) = (1920, 1080, 30, 6, 1)
+            (job.codec, job.spin, job.colorCycle) = (.hevc, 0, 0)
+            model.export.render(job, to: URL(fileURLWithPath: argument))
         case "export-cancel": model.export.cancel()
         case "export-sheet":
             // export-sheet:image / export-sheet:video opens the export sheet; export-sheet:off closes it
@@ -100,8 +97,12 @@ final class DevHooks {
                 if let image = bitmap.cgImage { try? Engine.writePNG(image, to: URL(fileURLWithPath: argument)) }
             }
         case "movie":
-            // movie:<path> records the view to that file; movie:off stops
-            if argument == "off" { model.stopRecording() } else { model.startRecording(to: URL(fileURLWithPath: argument)) }
+            // movie:<path> records the view to that file, movie: to the video folder; movie:off stops
+            if argument == "off" {
+                model.stopRecording()
+            } else {
+                model.startRecording(to: argument.isEmpty ? nil : URL(fileURLWithPath: argument))
+            }
         case "export-status":
             let export = model.export
             try? "running=\(export.running) progress=\(export.progress) status=\(export.status)"

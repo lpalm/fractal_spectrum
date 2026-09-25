@@ -22,7 +22,9 @@ public enum Minibrot {
     public static func nucleus(near start: PlanePoint, period: Int, precision: Int) -> PlanePoint? {
         let re = HPFloat(0, precision: precision), im = HPFloat(0, precision: precision)
         let start = start.withPrecision(precision)
-        let steps = fs_find_nucleus(start.re.handle, start.im.handle, period, 64, re.handle, im.handle)
+        let steps = withExtendedLifetime(start) {
+            fs_find_nucleus(start.re.handle, start.im.handle, period, 64, re.handle, im.handle)
+        }
         return steps > 0 ? PlanePoint(re: re, im: im) : nil
     }
 
@@ -36,11 +38,12 @@ public enum Minibrot {
     }
 
     /// The lowest-period component whose atom domain meets the disk of radius 2^searchLog2Radius around
-    /// `center`, located to the precision a view of radius 2^viewLog2Radius needs; nil if none is found.
+    /// `center`, located to the precision a view of radius 2^viewLog2Radius needs; nil if none is found
+    /// or its period is `excludedPeriod`.
     public static func locate(near center: PlanePoint, searchLog2Radius: Double, viewLog2Radius: Double,
-                              maxPeriod: Int) -> Found? {
+                              maxPeriod: Int, excludedPeriod: Int? = nil) -> Found? {
         let period = period(center: center, log2Radius: searchLog2Radius, maxPeriod: maxPeriod)
-        guard period > 0 else { return nil }
+        guard period > 0, period != excludedPeriod else { return nil }
         // Newton's method needs about twice the digits of the view to converge on the nucleus
         let precision = max(center.precision, Int(-viewLog2Radius) * 2 + 160)
         guard let nucleus = nucleus(near: center, period: period, precision: precision) else { return nil }

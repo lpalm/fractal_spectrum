@@ -228,7 +228,7 @@ final class FractalMTKView: MTKView {
             case "q": model.camera.rotate(by: .pi / 12, animated: true)
             case "e": model.camera.rotate(by: -.pi / 12, animated: true)
             case "h": model.goHome()
-            case " ": model.showUI.toggle()
+            case " ": model.toggleInterface()
             case "j": model.toggleJulia()
             case "c": model.cyclePalette(1)
             case "x": model.cyclePalette(-1)

@@ -52,7 +52,7 @@ struct FractalSpectrumApp: App {
                     .keyboardShortcut("j", modifiers: [])
             }
             CommandGroup(after: .sidebar) {
-                Button(model.showUI ? "Hide Interface" : "Show Interface") { model.showUI.toggle() }
+                Button(model.showUI ? "Hide Interface" : "Show Interface") { model.toggleInterface() }
                     .keyboardShortcut(.space, modifiers: [])
             }
         }

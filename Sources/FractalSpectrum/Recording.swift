@@ -47,11 +47,12 @@ final class LiveRecorder: @unchecked Sendable {
     func finish(completion: @escaping @Sendable (Bool) -> Void) {
         let end = CMTime(seconds: CACurrentMediaTime() - startTime, preferredTimescale: 6000)
         queue.async { [self] in
-            // a session that never started (no frames) has nothing to end
-            movie.finish(at: lastTime == .negativeInfinity ? nil : max(end, lastTime)) { [url] written in
-                if !written { try? FileManager.default.removeItem(at: url) }
-                completion(written)
+            // without frames there is no session to end, and nothing to keep
+            guard lastTime != .negativeInfinity else {
+                movie.cancel()
+                return completion(false)
             }
+            movie.finish(at: max(end, lastTime), completion: completion)
         }
     }
 }

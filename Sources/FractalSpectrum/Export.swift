@@ -74,10 +74,10 @@ final class ExportController {
         didSet { defaults.set(cycleColors, forKey: "export.cycleColors") }
     }
     /// Folders that exports are saved to.
-    var imageFolder = ExportController.savedFolder("export.imageFolder", default: .picturesDirectory) {
+    var imageFolder = ExportController.rememberedFolder("export.imageFolder", default: .picturesDirectory) {
         didSet { defaults.set(imageFolder.path, forKey: "export.imageFolder") }
     }
-    var videoFolder = ExportController.savedFolder("export.videoFolder", default: .moviesDirectory) {
+    var videoFolder = ExportController.rememberedFolder("export.videoFolder", default: .moviesDirectory) {
         didSet { defaults.set(videoFolder.path, forKey: "export.videoFolder") }
     }
 
@@ -128,45 +128,58 @@ final class ExportController {
         if kind == .image { imageFolder = url } else { videoFolder = url }
     }
 
-    /// The remembered folder while it still exists, else the given standard folder.
-    private static func savedFolder(_ key: String, default directory: FileManager.SearchPathDirectory) -> URL {
-        var isDirectory: ObjCBool = false
-        if let path = defaults.string(forKey: key),
-           FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue {
-            return URL(fileURLWithPath: path, isDirectory: true)
-        }
-        return FileManager.default.urls(for: directory, in: .userDomainMask)[0]
+    /// The folder remembered under `key`, else the given standard folder. Whether it can still be
+    /// saved to is checked when something is saved.
+    private static func rememberedFolder(_ key: String, default directory: FileManager.SearchPathDirectory) -> URL {
+        defaults.string(forKey: key).map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? FileManager.default.urls(for: directory, in: .userDomainMask)[0]
     }
 
-    /// A file in `folder` named after the current time ("Spectrum 2026-09-25 at 09.41.00.png"),
-    /// numbered if that name is taken.
-    private static func newFile(in folder: URL, extension fileExtension: String) -> URL {
-        let name = defaultName("Spectrum", fileExtension)
-        var url = folder.appendingPathComponent(name)
+    /// Why files can't be saved to `folder` ("“Exports” is missing"), or nil if they can.
+    static func problem(savingTo folder: URL) -> String? {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return "“\(folder.lastPathComponent)” is missing"
+        }
+        return FileManager.default.isWritableFile(atPath: folder.path) ? nil : "“\(folder.lastPathComponent)” is read-only"
+    }
+
+    /// A new file in `folder` named after the current time, like the system's screenshots
+    /// ("Spectrum 2026-09-25 at 09.41.00.png"), numbered if that name is taken.
+    static func newFile(_ prefix: String = "Spectrum", in folder: URL, extension fileExtension: String) -> URL {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+        let name = "\(prefix) \(formatter.string(from: Date()))"
+        var url = folder.appendingPathComponent("\(name).\(fileExtension)")
         var number = 2
         while FileManager.default.fileExists(atPath: url.path) {
-            url = folder.appendingPathComponent((name as NSString).deletingPathExtension + " \(number).\(fileExtension)")
+            url = folder.appendingPathComponent("\(name) \(number).\(fileExtension)")
             number += 1
         }
         return url
     }
 
-    /// "Prefix 2026-09-25 at 09.41.00.ext", like the system's screenshots.
-    static func defaultName(_ prefix: String, _ fileExtension: String) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
-        return "\(prefix) \(formatter.string(from: Date())).\(fileExtension)"
-    }
-
-    /// Renders the current view as an image into the image folder (or to `destination`).
-    func exportImage(model: AppModel, to destination: URL? = nil) {
-        let url = destination ?? ExportController.newFile(in: imageFolder, extension: "png")
+    /// An image of the current view at the chosen size and smoothness.
+    func imageJob(model: AppModel) -> Exporter.ImageJob {
         var iteration = model.iteration
         iteration.maxIter = max(iteration.maxIter, IterationTuner.lowestLimit)
-        let job = Exporter.ImageJob(scene: FractalScene(formula: model.formula, view: model.camera.view, iteration: iteration),
-                                    color: model.color, width: imageSize.width, height: imageSize.height,
-                                    samples: imageSamples, colorOrigin: model.engine.colorOrigin)
-        run("Rendering \(imageSize.width)×\(imageSize.height)", to: url) { [weak self] exporter, token in
+        return Exporter.ImageJob(scene: FractalScene(formula: model.formula, view: model.camera.view, iteration: iteration),
+                                 color: model.color, width: imageSize.width, height: imageSize.height,
+                                 samples: imageSamples, colorOrigin: model.engine.colorOrigin)
+    }
+
+    /// A zoom from the overview to the current view with the chosen video settings.
+    func videoJob(model: AppModel) -> Exporter.VideoJob {
+        Exporter.VideoJob(formula: model.formula, target: model.camera.view, start: Viewport.home(for: model.formula),
+                          color: model.color, width: videoSize.width, height: videoSize.height, fps: fps,
+                          duration: duration, samples: videoSamples, codec: codec, spin: spin,
+                          colorCycle: cycleColors ? 0.05 : 0)
+    }
+
+    /// Renders an image into the image folder (or to `destination`).
+    func render(_ job: Exporter.ImageJob, to destination: URL? = nil) {
+        let url = destination ?? ExportController.newFile(in: imageFolder, extension: "png")
+        run("Rendering \(job.width)×\(job.height)", to: url) { [weak self] exporter, token in
             try exporter.exportImage(job, to: url) { fraction in
                 DispatchQueue.main.async { self?.progress = fraction }
                 return !token.cancelled
@@ -174,13 +187,9 @@ final class ExportController {
         }
     }
 
-    /// Renders a zoom from the overview to the current view into the video folder (or to `destination`).
-    func exportVideo(model: AppModel, to destination: URL? = nil) {
-        let url = destination ?? ExportController.newFile(in: videoFolder, extension: codec == .prores ? "mov" : "mp4")
-        let job = Exporter.VideoJob(formula: model.formula, target: model.camera.view,
-                                    start: Viewport.home(for: model.formula), color: model.color,
-                                    width: videoSize.width, height: videoSize.height, fps: fps, duration: duration,
-                                    samples: videoSamples, codec: codec, spin: spin, colorCycle: cycleColors ? 0.05 : 0)
+    /// Renders a zoom video into the video folder (or to `destination`).
+    func render(_ job: Exporter.VideoJob, to destination: URL? = nil) {
+        let url = destination ?? ExportController.newFile(in: videoFolder, extension: job.codec == .prores ? "mov" : "mp4")
         run("Rendering \(job.frameCount.formatted()) frames", to: url) { [weak self] exporter, token in
             try exporter.exportVideo(job, to: url) { fraction, image in
                 DispatchQueue.main.async {
@@ -192,10 +201,17 @@ final class ExportController {
         }
     }
 
-    /// Runs an export off the main thread; `render` checks the token to stop early.
+    /// Runs an export off the main thread, one at a time; `render` checks the token to stop early.
     private func run(_ title: String, to url: URL,
                      render: @escaping @Sendable (Exporter, CancelToken) throws -> Void) {
+        guard !running else {
+            announce?("An export is already running")
+            return
+        }
         begin(title)
+        if let problem = ExportController.problem(savingTo: url.deletingLastPathComponent()) {
+            return finish(url: nil, message: "Export failed: \(problem)")
+        }
         let token = cancelToken
         Task.detached(priority: .userInitiated) { [weak self] in
             do {
@@ -272,7 +288,10 @@ struct ExportSheet: View {
                 Button("Close") { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button(export.kind == .image ? "Save Image" : "Render Video") {
-                    if export.kind == .image { export.exportImage(model: model) } else { export.exportVideo(model: model) }
+                    switch export.kind {
+                    case .image: export.render(export.imageJob(model: model))
+                    case .video: export.render(export.videoJob(model: model))
+                    }
                 }
                 .buttonStyle(.glassProminent)
                 .keyboardShortcut(.defaultAction)

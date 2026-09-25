@@ -126,7 +126,7 @@ struct TopControls: View {
                 control("scope", "Find a mini-Mandelbrot in view (M)") { model.findMinibrot() }
                 control("house.fill", "Home (H)") { model.goHome() }
                 control("questionmark", "Shortcuts") { model.showHelp.toggle() }
-                control("eye.slash", "Hide interface (Space)") { model.showUI = false }
+                control("eye.slash", "Hide interface (Space)") { model.toggleInterface() }
             }
         }
     }

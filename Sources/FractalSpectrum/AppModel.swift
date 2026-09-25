@@ -68,9 +68,7 @@ final class AppModel {
     }
 
     // Interface
-    var showUI = true {
-        didSet { if oldValue && !showUI { announce("Space brings the interface back") } }
-    }
+    var showUI = true
     var showHelp = false
     var showExport = false
     var showGoTo = false
@@ -466,7 +464,10 @@ final class AppModel {
 
     /// Records the canvas as shown (without the interface) to a movie, by default in the video export folder.
     func startRecording(to file: URL? = nil) {
-        let url = file ?? export.videoFolder.appendingPathComponent(ExportController.defaultName("Spectrum Recording", "mp4"))
+        let url = file ?? ExportController.newFile("Spectrum Recording", in: export.videoFolder, extension: "mp4")
+        if let problem = ExportController.problem(savingTo: url.deletingLastPathComponent()) {
+            return announce("Recording failed: \(problem)")
+        }
         do {
             renderer.recorder = try LiveRecorder(url: url, drawableSize: renderer.drawableSize)
             recordingSince = Date()
@@ -506,6 +507,12 @@ final class AppModel {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(coordinatesText, forType: .string)
         announce("Coordinates copied")
+    }
+
+    /// Hides or shows the interface; hiding it says how to bring it back.
+    func toggleInterface() {
+        showUI.toggle()
+        if !showUI { announce("Space brings the interface back") }
     }
 
     /// Shows a short notice at the top of the window.

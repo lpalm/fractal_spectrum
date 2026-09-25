@@ -66,16 +66,39 @@ public final class VideoWriter: @unchecked Sendable {
         adaptor.append(buffer, withPresentationTime: time)
     }
 
-    public func cancel() {
-        input.markAsFinished()
-        writer.cancelWriting()
+    /// Appends a frame once the encoder can take it (offline writing); throws when writing has failed,
+    /// which would otherwise leave the encoder never ready.
+    public func appendWhenReady(_ buffer: CVPixelBuffer, at time: CMTime) throws {
+        while !input.isReadyForMoreMediaData {
+            guard writer.status == .writing else { throw failure }
+            Thread.sleep(forTimeInterval: 0.002)
+        }
+        guard adaptor.append(buffer, withPresentationTime: time) else { throw failure }
     }
 
-    /// Ends the movie, at `end` if given (the last frame holds until then), and reports whether it was written.
+    /// Abandons the movie and deletes its file (a finished movie is kept).
+    public func cancel() {
+        switch writer.status {
+        case .writing: writer.cancelWriting()   // which deletes the file
+        case .failed: try? FileManager.default.removeItem(at: writer.outputURL)
+        default: break
+        }
+    }
+
+    /// Ends the movie, at `end` if given (the last frame holds until then), and reports whether it was
+    /// written; a movie that could not be written is deleted.
     public func finish(at end: CMTime? = nil, completion: @escaping @Sendable (Bool) -> Void) {
+        guard writer.status == .writing else {
+            cancel()
+            return completion(false)
+        }
         input.markAsFinished()
         if let end { writer.endSession(atSourceTime: end) }
-        writer.finishWriting { [writer] in completion(writer.status == .completed) }
+        writer.finishWriting { [self] in
+            let written = writer.status == .completed
+            if !written { cancel() }
+            completion(written)
+        }
     }
 
     /// Ends the movie and waits until it is written.

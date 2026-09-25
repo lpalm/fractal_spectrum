@@ -139,6 +139,8 @@ public final class Exporter: @unchecked Sendable {
                             progress: @escaping (Double, CGImage?) -> Bool) throws {
         let movie = try VideoWriter(url: url, fileType: job.codec == .prores ? .mov : .mp4, width: job.width,
                                     height: job.height, settings: job.encoderSettings, realTime: false)
+        var saved = false
+        defer { if !saved { movie.cancel() } }   // an export stopped by an error or the user leaves no file
         movie.startSession(at: .zero)
         let frames = job.frameCount
         var iteration = IterationSettings()
@@ -169,15 +171,12 @@ public final class Exporter: @unchecked Sendable {
             let proposal = IterationTuner.adjustOffline(maxIter: iteration.maxIter, stats: stats, samples: job.width * job.height,
                                                         gpuMs: gpuMs, passes: job.samples)
             iteration.maxIter = max(iteration.maxIter, proposal)
-            while !movie.isReadyForMoreMediaData { Thread.sleep(forTimeInterval: 0.002) }
-            movie.append(pixelBuffer, at: CMTime(value: CMTimeValue(frame), timescale: CMTimeScale(job.fps)))
+            try movie.appendWhenReady(pixelBuffer, at: CMTime(value: CMTimeValue(frame), timescale: CMTimeScale(job.fps)))
             let preview = frame % 10 == 0 ? Exporter.image(from: pixelBuffer) : nil
-            if !progress(Double(frame + 1) / Double(frames), preview) {
-                movie.cancel()
-                throw CocoaError(.userCancelled)
-            }
+            if !progress(Double(frame + 1) / Double(frames), preview) { throw CocoaError(.userCancelled) }
         }
         try movie.finishAndWait()
+        saved = true
     }
 
     /// The pixels of a BGRA pixel buffer as an image (for previews).
