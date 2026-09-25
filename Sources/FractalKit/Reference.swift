@@ -268,6 +268,8 @@ final class BLATable {
     let logR: MTLBuffer
     /// log2 of the smallest |Z| each approximation steps over.
     let minZ: MTLBuffer
+    /// Largest level-0 radius squared (float bits), for skipping hopeless lookups.
+    let maxR2: MTLBuffer
     let offsets: [UInt32]
     let counts: [UInt32]
     let log2C: Double
@@ -302,7 +304,9 @@ final class BLATable {
             r2 = old.r2
             logR = old.logR
             minZ = old.minZ
+            maxR2 = old.maxR2
         } else {
+            maxR2 = device.makeBuffer(length: 16, options: .storageModePrivate)!
             let cap = total + total / 2
             entries = device.makeBuffer(length: cap * MemoryLayout<FSBLAEntry>.stride, options: .storageModePrivate)!
             r2 = device.makeBuffer(length: cap * 4, options: .storageModePrivate)!
@@ -322,6 +326,8 @@ final class BLATable {
         enc.setBuffer(logR, offset: 0, index: 2)
         enc.setBuffer(s.zx, offset: 0, index: 3)
         enc.setBuffer(minZ, offset: 0, index: 5)
+        enc.setBuffer(maxR2, offset: 0, index: 6)
+        gpu.dispatch1D(enc, gpu.pipeline("bla_reset_max"), count: 1)
         var p = FSBLABuildParams(count: UInt32(count0), srcOffset: 0, dstOffset: 0, srcCount: 0,
                                  log2Eps: Float(log2Eps), log2C: Float(max(log2C, -1e30)), pad0: 0, pad1: 0)
         enc.setBytes(&p, length: MemoryLayout<FSBLABuildParams>.stride, index: 4)

@@ -153,6 +153,7 @@ constant bool JULIA [[function_constant(2)]];
 constant bool USE_BLA [[function_constant(3)]];
 constant bool WITH_DER [[function_constant(4)]];
 constant bool DEEP [[function_constant(5)]];
+constant bool INTERIOR [[function_constant(6)]];   // detect attracting cycles (views containing interior)
 
 constant bool IS_MANDEL = FORMULA == FS_FORMULA_MANDEL;
 
@@ -356,12 +357,14 @@ inline fx pert_ext(FSRefExt Zr, fx w) {
 struct Der {
     float4 J;
     int e;
+    float inv;   // 2^-e, cached for the "+1" term of each step
 };
 
 inline Der der_init() {
     Der d;
     d.J = JULIA ? (IS_MANDEL ? float4(1.0f, 0.0f, 0.0f, 0.0f) : float4(1.0f, 0.0f, 0.0f, 1.0f)) : float4(0.0f);
     d.e = 0;
+    d.inv = 1.0f;
     return d;
 }
 
@@ -371,6 +374,7 @@ inline Der der_renorm(Der d) {
         int k = expo(a);
         d.J = scl(d.J, -k);
         d.e += k;
+        d.inv = scl(1.0f, -d.e);
     }
     return d;
 }
@@ -380,11 +384,11 @@ inline Der der_step(Der d, float2 z) {
     float4 M = jacobian(z);
     if (IS_MANDEL) {
         float2 j = cmul(float2(M.x, M.z), d.J.xy);
-        if (!JULIA) j.x += scl(1.0f, -d.e);
+        if (!JULIA) j.x += d.inv;
         d.J = float4(j, 0.0f, 0.0f);
     } else {
         d.J = matmul(M, d.J);
-        if (!JULIA) d.J += scl(float4(1.0f, 0.0f, 0.0f, 1.0f), -d.e);
+        if (!JULIA) d.J += float4(d.inv, 0.0f, 0.0f, d.inv);
     }
     return der_renorm(d);
 }
@@ -418,6 +422,7 @@ inline Der der_bla(Der d, FSBLAEntry E) {
         d.J = scl(d.J, -k);
         d.e += k;
     }
+    d.inv = scl(1.0f, -d.e);
     return d;
 }
 
@@ -554,6 +559,8 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
                             device const float *blaR2b [[buffer(12)]],
                             device const float *blaLogRb [[buffer(13)]],
                             device const float *blaMinZb [[buffer(14)]],
+                            device const float *blaMaxR2 [[buffer(15)]],
+                            device const float *blaMaxR2b [[buffer(16)]],
                             uint2 gid [[thread_position_in_grid]]) {
     uint2 pix = gid + P.origin;
     bool active = gid.x < P.workSize.x && gid.y < P.workSize.y;
@@ -584,6 +591,8 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
     constant uint *offT = P.blaOffset;
     constant uint *cntT = P.blaCount;
     uint levels = P.blaLevels;
+    // Largest level-0 radius of each table: deltas beyond it skip the lookup entirely.
+    float maxR2 = USE_BLA ? blaMaxR2[0] : 0.0f;
     bool escaped = false;
     float2 zEsc = float2(0.0f);
     uint maxIter = active ? P.maxIter : 0;
@@ -594,6 +603,7 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
             zf = Zf2; zxr = Zx2; blaT = bla2; r2T = blaR2b; lrT = blaLogRb; mzT = blaMinZb;  \
             offT = P.blaOffset2; cntT = P.blaCount2; levels = P.blaLevels2;                  \
             refEnd = P.refLen2 - 1;                                                          \
+            maxR2 = USE_BLA ? blaMaxR2b[0] : 0.0f;                                           \
         }
     float4 Jz = IS_MANDEL ? float4(1.0f, 0.0f, 0.0f, 0.0f) : float4(1.0f, 0.0f, 0.0f, 1.0f);
     int jze = 0;
@@ -612,7 +622,7 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
             float r2 = dot(z, z);
             if (r2 > P.bailout2) { escaped = true; zEsc = z; break; }
             if (n == maxIter) break;
-            if (r2 < rmin2) {
+            if (INTERIOR && r2 < rmin2) {
                 float lz = 0.5f * log2(r2);
                 pendingRec = pendingRec || lz < lrmin - 1.0f;
                 lrmin = lz;
@@ -636,7 +646,7 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
                 if (dot(zz, zz) > P.bailout2) { escaped = true; zEsc = zz; break; }
             }
             if (n == maxIter) break;
-            {
+            if (INTERIOR) {
                 float lz = 0.5f * log2(max(dot(zx.m, zx.m), 1e-30f)) + float(zx.e);
                 if (lz < lrmin) {
                     pendingRec = pendingRec || lz < lrmin - 1.0f;
@@ -665,7 +675,7 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
             uint idx = 0;
             if (!ext) {
                 float d2 = dot(d, d);
-                for (uint k = 0; k < levels; k++) {
+                for (uint k = 0; k < levels && d2 < maxR2; k++) {
                     if ((j & ((1u << k) - 1u)) != 0u) break;
                     uint jj = j >> k;
                     if (jj >= cntT[k]) break;
@@ -688,15 +698,17 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
             }
             if (best >= 0) {
                 FSBLAEntry E = blaT[idx];
-                float lmz = mzT[idx];
-                if (lmz < lrmin) {
-                    pendingRec = pendingRec || lmz < lrmin - 1.0f;
-                    lrmin = lmz;
-                    rmin2 = lmz > -62.0f ? exp2(2.0f * lmz) : 0.0f;
+                if (INTERIOR) {
+                    float lmz = mzT[idx];
+                    if (lmz < lrmin) {
+                        pendingRec = pendingRec || lmz < lrmin - 1.0f;
+                        lrmin = lmz;
+                        rmin2 = lmz > -62.0f ? exp2(2.0f * lmz) : 0.0f;
+                    }
+                    if (IS_MANDEL) Jz.xy = cmul(float2(E.A.x, E.A.z), Jz.xy);
+                    else Jz = matmul(E.A, Jz);
+                    jze += E.Ae;
                 }
-                if (IS_MANDEL) Jz.xy = cmul(float2(E.A.x, E.A.z), Jz.xy);
-                else Jz = matmul(E.A, Jz);
-                jze += E.Ae;
                 if (!ext) {
                     d = scl(matvec(E.A, d), E.Ae);
                     if (!JULIA) d += scl(matvec(E.B, dc.m), E.Be + dc.e);
@@ -714,21 +726,25 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
         if (!stepped) {
             if (WITH_DER) der = der_step(der, z);
             if (!ext) {
-                float4 M = jacobian(z);
-                if (IS_MANDEL) Jz.xy = cmul(float2(M.x, M.z), Jz.xy);
-                else Jz = matmul(M, Jz);
+                if (INTERIOR) {
+                    float4 M = jacobian(z);
+                    if (IS_MANDEL) Jz.xy = cmul(float2(M.x, M.z), Jz.xy);
+                    else Jz = matmul(M, Jz);
+                }
                 d = pert(Z, d) + dcA;
             } else {
-                float4 M = jacobian(zx.m);
-                if (IS_MANDEL) Jz.xy = cmul(float2(M.x, M.z), Jz.xy);
-                else Jz = matmul(M, Jz);
-                jze += (IS_MANDEL ? POWER - 1 : 1) * zx.e;
+                if (INTERIOR) {
+                    float4 M = jacobian(zx.m);
+                    if (IS_MANDEL) Jz.xy = cmul(float2(M.x, M.z), Jz.xy);
+                    else Jz = matmul(M, Jz);
+                    jze += (IS_MANDEL ? POWER - 1 : 1) * zx.e;
+                }
                 w = JULIA ? pert_ext(Zr, w) : fx_add(pert_ext(Zr, w), dc);
             }
             m++;
             n++;
         }
-        float ja = max(max(abs(Jz.x), abs(Jz.y)), max(abs(Jz.z), abs(Jz.w)));
+        float ja = INTERIOR ? max(max(abs(Jz.x), abs(Jz.y)), max(abs(Jz.z), abs(Jz.w))) : 0.0f;
         if (ja > 0.0f) {
             int k = expo(ja);
             Jz = scl(Jz, -k);
@@ -753,6 +769,7 @@ kernel void bla_init(device FSBLAEntry *E [[buffer(0)]],
                      device const FSRefExt *Zx [[buffer(3)]],
                      constant FSBLABuildParams &p [[buffer(4)]],
                      device float *MZ [[buffer(5)]],
+                     device atomic_uint *maxR2 [[buffer(6)]],
                      uint i [[thread_position_in_grid]]) {
     if (i >= p.count) return;
     FSRefExt Z = Zx[i + 1];
@@ -796,7 +813,14 @@ kernel void bla_init(device FSBLAEntry *E [[buffer(0)]],
     E[p.dstOffset + i] = e;
     MZ[p.dstOffset + i] = lz;
     LR[p.dstOffset + i] = logR;
-    R2[p.dstOffset + i] = logR >= -62.0f ? exp2(2.0f * logR) : 0.0f;
+    float r2 = logR >= -62.0f ? exp2(2.0f * logR) : 0.0f;
+    R2[p.dstOffset + i] = r2;
+    // non-negative floats order like their bit patterns
+    atomic_fetch_max_explicit(maxR2, as_type<uint>(r2), memory_order_relaxed);
+}
+
+kernel void bla_reset_max(device uint *maxR2 [[buffer(6)]], uint i [[thread_position_in_grid]]) {
+    if (i == 0) maxR2[0] = 0u;
 }
 
 inline float specnorm(float4 A) {

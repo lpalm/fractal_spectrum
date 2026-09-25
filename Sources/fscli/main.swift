@@ -147,7 +147,7 @@ case "bench":
     let (w, h) = size()
     engine.calibrate(scene: &scene, width: w, height: h)
     let ms = engine.benchmarkPass(scene: scene, width: w, height: h, runs: args.int("runs", 5),
-                                  warmup: args.double("warmup", 2))
+                                  warmup: args.double("warmup", 2), interior: args.values["nointerior"] == nil)
     print(String(format: "%dx%d maxIter %d: best %.2f ms GPU", w, h, scene.iter.maxIter, ms))
 
 case "dive":
@@ -192,8 +192,9 @@ case "stats":
     cb.commit()
     cb.waitUntilCompleted()
     let s = engine.readStats(slot)
-    print(String(format: "maxIter %d (eff %d): escaped %u late %u unresolved %u interior %u  gpu %.1f ms", scene.iter.maxIter,
-                 plan.effectiveMaxIter, s.escaped, s.lateEscaped, s.unresolved, s.interior, (cb.gpuEndTime - cb.gpuStartTime) * 1000))
+    print(String(format: "maxIter %d (eff %d): escaped %u late %u unresolved %u interior %u  gpu %.1f ms  mean iterations %.0f",
+                 scene.iter.maxIter, plan.effectiveMaxIter, s.escaped, s.lateEscaped, s.unresolved, s.interior,
+                 (cb.gpuEndTime - cb.gpuStartTime) * 1000, Double(s.iterations) / Double(w * h)))
 
 case "video":
     let scene = makeScene()

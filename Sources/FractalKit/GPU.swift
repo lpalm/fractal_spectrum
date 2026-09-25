@@ -21,6 +21,7 @@ public final class GPU: @unchecked Sendable {
         var useBLA = false
         var withDer = false
         var deep = false
+        var interior = true
     }
 
     private init() {
@@ -65,13 +66,14 @@ public final class GPU: @unchecked Sendable {
             if GPU.specialised.contains(key.name) {
                 let values = MTLFunctionConstantValues()
                 var formula = key.formula, power = key.power
-                var julia = key.julia, bla = key.useBLA, der = key.withDer, deep = key.deep
+                var julia = key.julia, bla = key.useBLA, der = key.withDer, deep = key.deep, interior = key.interior
                 values.setConstantValue(&formula, type: .int, index: 0)
                 values.setConstantValue(&power, type: .int, index: 1)
                 values.setConstantValue(&julia, type: .bool, index: 2)
                 values.setConstantValue(&bla, type: .bool, index: 3)
                 values.setConstantValue(&der, type: .bool, index: 4)
                 values.setConstantValue(&deep, type: .bool, index: 5)
+                values.setConstantValue(&interior, type: .bool, index: 6)
                 function = try library.makeFunction(name: key.name, constantValues: values)
             } else {
                 guard let f = library.makeFunction(name: key.name) else { fatalError("Missing kernel \(key.name)") }

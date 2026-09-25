@@ -32,13 +32,14 @@ extension Engine {
 
     /// GPU milliseconds of one full iteration pass (best of `runs`) after keeping the GPU busy
     /// for `warmup` seconds so clocks have ramped up.
-    public func benchmarkPass(scene: FractalScene, width: Int, height: Int, runs: Int, warmup: Double = 2) -> Double {
+    public func benchmarkPass(scene: FractalScene, width: Int, height: Int, runs: Int, warmup: Double = 2,
+                              interior: Bool = true) -> Double {
         let g = makeGBuffer(samples: width * height)
         func pass(wait: Bool = true) -> Double {
             guard let cb = gpu.queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return .infinity }
             let slot = nextStatsSlot()
             guard let plan = makePlan(scene: scene, grid: Grid(width: width, height: height), enc: enc, blocking: true,
-                                      statsSlot: slot) else {
+                                      statsSlot: slot, interior: interior) else {
                 enc.endEncoding()
                 cb.commit()
                 return .infinity

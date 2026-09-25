@@ -118,6 +118,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     private var lastGpuMs = 0.0
     private var lastIterChange = 0.0
     private var iterationRate = 0.0
+    private var interiorLikely = true
     private let presentInFlight = DispatchSemaphore(value: 2)
 
     init(engine: Engine, camera: Camera) {
@@ -250,6 +251,9 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
                 self.learnCost(ms: ms, samples: samples, total: totalSamples)
                 if let slot = statsSlot {
                     let st = self.engine.readStats(slot)
+                    // Cycle detection costs time on every step; keep it only while the view has
+                    // (possible) interior: detected cycles or samples stuck at the limit.
+                    self.interiorLikely = Double(st.interior + st.unresolved) > Double(samples) * 0.002
                     if ms > 0.5 { self.iterationRate = self.iterationRate * 0.7 + Double(st.iterations) / (ms / 1000) * 0.3 }
                     if sceneAtEncode == self.sceneVersion { self.consider(stats: st, samples: samples) }
                 }
@@ -368,7 +372,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         let slot = engine.nextStatsSlot()
         guard let plan = engine.makePlan(scene: scene(v), grid: Engine.Grid(width: pw, height: ph), enc: iter,
                                          blocking: false, focus: camera.focus(width: size.x, height: size.y),
-                                         statsSlot: slot, exclusive: true),
+                                         statsSlot: slot, exclusive: true, interior: interiorLikely),
               let gPreview, let gFull, let accum, let previewColor else {
             needsPreview = true   // reference still computing: keep reprojecting the last image
             return (0, nil)
@@ -418,7 +422,8 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         let jitter = stage == .aa ? Engine.jitter(aaIndex) : .zero
         let slot = engine.nextStatsSlot()
         guard let plan = engine.makePlan(scene: scene(v), grid: Engine.Grid(width: size.x, height: size.y, jitter: jitter),
-                                         enc: iter, blocking: false, statsSlot: slot, exclusive: true) else { return 0 }
+                                         enc: iter, blocking: false, statsSlot: slot, exclusive: true,
+                                         interior: interiorLikely) else { return 0 }
         let target = stage == .aa ? gAA : gFull
         if !statsSettled, let slot = lastPreviewSlot {
             // motion ended: settle colours on the last preview's statistics

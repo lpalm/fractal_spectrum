@@ -73,8 +73,10 @@ public final class Engine: @unchecked Sendable {
     /// Encodes BLA table construction into `enc` when the table must be (re)built.
     /// When `exclusive` is true no earlier submitted pass can still read this engine's tables, so a
     /// rebuild may reuse their buffers.
+    /// `interior`: compile in attracting-cycle detection (worth it only when the view contains interior).
     public func makePlan(scene: FractalScene, grid: Grid, enc: MTLComputeCommandEncoder, blocking: Bool,
-                         focus: Focus? = nil, statsSlot: UInt32, exclusive: Bool = false) -> Plan? {
+                         focus: Focus? = nil, statsSlot: UInt32, exclusive: Bool = false,
+                         interior: Bool = true) -> Plan? {
         let f = scene.formula
         let v = scene.view
         let minSide = Double(min(grid.width, grid.height))
@@ -182,6 +184,7 @@ public final class Engine: @unchecked Sendable {
         key.name = "iterate_perturb"
         key.useBLA = table != nil
         key.deep = deep
+        key.interior = interior
         return Plan(params: p, pipeline: gpu.pipeline(key), ref: snap, bla: table, critical: critSnap,
                     criticalBLA: critTable, perturbed: true, deep: deep, effectiveMaxIter: effMax)
     }
@@ -210,6 +213,8 @@ public final class Engine: @unchecked Sendable {
             enc.setBuffer(plan.criticalBLA?.r2 ?? dummy, offset: 0, index: 12)
             enc.setBuffer(plan.criticalBLA?.logR ?? dummy, offset: 0, index: 13)
             enc.setBuffer(plan.criticalBLA?.minZ ?? dummy, offset: 0, index: 14)
+            enc.setBuffer(plan.bla?.maxR2 ?? dummy, offset: 0, index: 15)
+            enc.setBuffer(plan.criticalBLA?.maxR2 ?? dummy, offset: 0, index: 16)
         }
         enc.setBuffer(stats, offset: 0, index: 7)
         gpu.dispatch2D(enc, plan.pipeline, width: Int(size.x), height: Int(size.y))
