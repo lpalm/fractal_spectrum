@@ -53,6 +53,9 @@ final class AppModel {
     var cycleColors = false
     var cycleSpeed = 0.08
 
+    // Places saved by the user
+    var bookmarks: [Location] = []
+
     // Guided tour
     var touring = false
     var caption: Caption?
@@ -89,6 +92,83 @@ final class AppModel {
         renderer.onFrame = { [weak self] dt in MainActor.assumeIsolated { self?.tick(dt) } }
         GPU.shared.prewarm()
         devHooks = DevHooks(model: self)
+        loadBookmarks()
+        restoreSession()
+        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil,
+                                               queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.saveSession() }
+        }
+        Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.saveSession() }
+        }
+    }
+
+    // MARK: Persistence
+
+    private struct Session: Codable {
+        var place: Location
+        var color: ColorSettings
+        var quality: String
+        var autoIterations: Bool
+    }
+
+    private static let sessionKey = "session.v1"
+    private static let bookmarksKey = "bookmarks.v1"
+    @ObservationIgnored private var lastSavedSession: Data?
+
+    func saveSession() {
+        let place = Location(id: "session", name: "Last view", formula: formula, view: camera.view,
+                             palette: color.palette, maxIter: iter.maxIter)
+        let session = Session(place: place, color: color, quality: quality.rawValue, autoIterations: iter.autoIterations)
+        guard let data = try? JSONEncoder().encode(session), data != lastSavedSession else { return }
+        lastSavedSession = data
+        UserDefaults.standard.set(data, forKey: AppModel.sessionKey)
+    }
+
+    private func restoreSession() {
+        guard let data = UserDefaults.standard.data(forKey: AppModel.sessionKey),
+              let s = try? JSONDecoder().decode(Session.self, from: data), let v = s.place.viewport else { return }
+        formula = s.place.formula
+        color = s.color
+        quality = Quality(rawValue: s.quality) ?? quality
+        iter.autoIterations = s.autoIterations
+        if let n = s.place.maxIter { iter.maxIter = n }
+        camera.minLog2Radius = formula.minLog2Radius
+        camera.jump(to: v)
+        lastSavedSession = data
+    }
+
+    private func loadBookmarks() {
+        guard let data = UserDefaults.standard.data(forKey: AppModel.bookmarksKey),
+              let list = try? JSONDecoder().decode([Location].self, from: data) else { return }
+        bookmarks = list
+    }
+
+    private func storeBookmarks() {
+        if let data = try? JSONEncoder().encode(bookmarks) { UserDefaults.standard.set(data, forKey: AppModel.bookmarksKey) }
+    }
+
+    func addBookmark() {
+        let v = camera.view
+        let name = "\(formula.displayName) · " + ScaleFact.magnification(v.zoomLog10)
+        let place = Location(id: "bm-" + UUID().uuidString, name: name, formula: formula, view: v,
+                             palette: color.palette, maxIter: iter.maxIter)
+        bookmarks.insert(place, at: 0)
+        storeBookmarks()
+        show("Saved to Your Places")
+    }
+
+    func removeBookmark(_ place: Location) {
+        bookmarks.removeAll { $0.id == place.id }
+        storeBookmarks()
+    }
+
+    func renameBookmark(_ place: Location, to name: String) {
+        guard let i = bookmarks.firstIndex(where: { $0.id == place.id }), !name.isEmpty else { return }
+        let b = bookmarks[i]
+        bookmarks[i] = Location(id: b.id, name: name, formula: b.formula, re: b.re, im: b.im, zoom: b.zoom,
+                                rotation: b.rotation, palette: b.palette, maxIter: b.maxIter)
+        storeBookmarks()
     }
 
     // MARK: Actions

@@ -235,7 +235,31 @@ struct LocationsSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SectionHeader(title: "Explore")
+            SectionHeader(title: "Explore", trailing: AnyView(
+                Button { model.addBookmark() } label: {
+                    Label("Save view", systemImage: "plus")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                }
+                .buttonStyle(.glass)
+                .controlSize(.small)
+                .help("Save the current view to Your Places (B)")
+            ))
+            if !model.bookmarks.isEmpty {
+                Text("Your Places")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.tertiary)
+                ForEach(model.bookmarks) { l in
+                    LocationRow(location: l, image: thumbs.image("loc-\(l.id)")) { model.fly(to: l) }
+                        .contextMenu {
+                            Button("Remove", role: .destructive) { model.removeBookmark(l) }
+                        }
+                        .onAppear { thumbs.requestLocation(l, color: model.color) }
+                }
+                Text("Curated")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 4)
+            }
             ForEach(Location.all) { l in
                 LocationRow(location: l, image: thumbs.image("loc-\(l.id)")) { model.fly(to: l) }
             }
@@ -603,6 +627,7 @@ struct HelpOverlay: View {
         ("P", "Autopilot dive"),
         ("T", "Guided tour"),
         ("H", "Home"),
+        ("B", "Save view to Your Places"),
         ("F", "Full screen"),
         ("Space", "Hide interface"),
         ("⇧⌘C", "Copy coordinates"),

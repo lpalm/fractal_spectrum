@@ -1,8 +1,8 @@
 import Foundation
 import FractalKit
 
-/// A curated place worth visiting.
-struct Location: Identifiable, Hashable {
+/// A place worth visiting: curated, or saved by the user.
+struct Location: Identifiable, Hashable, Codable {
     let id: String
     let name: String
     let formula: Formula
@@ -26,6 +26,33 @@ struct Location: Identifiable, Hashable {
 
     static func == (a: Location, b: Location) -> Bool { a.id == b.id }
     func hash(into h: inout Hasher) { h.combine(id) }
+
+    /// Captures a view with enough digits to restore it exactly.
+    init(id: String, name: String, formula: Formula, view: Viewport, palette: Int?, maxIter: Int?) {
+        let digits = max(20, Int(view.zoomLog10) + 20)
+        self.id = id
+        self.name = name
+        self.formula = formula
+        re = view.center.re.string(digits: digits)
+        im = view.center.im.string(digits: digits)
+        zoom = view.zoomLog10
+        rotation = view.rotation * 180 / .pi
+        self.palette = palette
+        self.maxIter = maxIter
+    }
+
+    init(id: String, name: String, formula: Formula, re: String, im: String, zoom: Double, rotation: Double = 0,
+         palette: Int? = nil, maxIter: Int? = nil) {
+        self.id = id
+        self.name = name
+        self.formula = formula
+        self.re = re
+        self.im = im
+        self.zoom = zoom
+        self.rotation = rotation
+        self.palette = palette
+        self.maxIter = maxIter
+    }
 }
 
 extension Location {
