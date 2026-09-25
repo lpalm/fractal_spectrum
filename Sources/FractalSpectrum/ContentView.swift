@@ -529,7 +529,7 @@ struct HUDBar: View {
             divider
             item("speedometer", "\(Int((s?.fps ?? 0).rounded()))", "fps")
             divider
-            item("bolt.fill", rateText(s?.iterationRate ?? 0), "iterations / s")
+            item("bolt.fill", rateText(s?.iterationRate ?? 0), "effective iter / s")
             divider
             HStack(spacing: 7) {
                 ProgressRing(progress: s?.progress ?? 0, active: (s?.stage ?? "") != "Done")
