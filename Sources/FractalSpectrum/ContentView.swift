@@ -614,6 +614,7 @@ struct TopControls: View {
                 control(model.touring ? "stop.fill" : "sparkles", model.touring ? "Stop tour (T)" : "Guided tour (T)") {
                     if model.touring { model.stopTour() } else { model.startTour() }
                 }
+                control("scope", "Find a mini-Mandelbrot in view (M)") { model.findMinibrot() }
                 control("house.fill", "Home (H)") { model.goHome() }
                 control("questionmark", "Shortcuts") { model.showHelp.toggle() }
                 control("eye.slash", "Hide interface (Space)") { model.showUI = false }
@@ -676,6 +677,7 @@ struct HelpOverlay: View {
         ("T", "Guided tour"),
         ("H", "Home"),
         ("B", "Save view to Your Places"),
+        ("M", "Find a mini-Mandelbrot in view"),
         ("F", "Full screen"),
         ("Space", "Hide interface"),
         ("⇧⌘C", "Copy coordinates"),

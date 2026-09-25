@@ -35,6 +35,7 @@ struct FractalSpectrumApp: App {
                 Divider()
                 Button(model.autopilot ? "Stop Autopilot" : "Start Autopilot") { model.autopilot.toggle() }
                     .keyboardShortcut("p", modifiers: [])
+                Button("Find Mini-Mandelbrot") { model.findMinibrot() }.keyboardShortcut("m", modifiers: [])
                 Button("Copy Coordinates") { model.copyCoordinates() }.keyboardShortcut("c", modifiers: [.command, .shift])
             }
             CommandMenu("Fractal") {

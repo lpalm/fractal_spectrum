@@ -161,6 +161,9 @@ final class FractalMTKView: MTKView {
             case "q": model.camera.rotate(by: .pi / 12, animated: true)
             case "e": model.camera.rotate(by: -.pi / 12, animated: true)
             case "h": model.goHome()
+            case "m":
+                model.findMinibrot()
+                return
             case "b":
                 model.addBookmark()
                 return

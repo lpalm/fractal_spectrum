@@ -33,6 +33,7 @@ final class DevHooks {
                 model.camera.jump(to: v)
             }
         case "home": model.goHome()
+        case "minibrot": model.findMinibrot()
         case "tour": if arg == "off" { model.stopTour() } else { model.startTour() }
         case "zoom": model.zoomStep(Double(arg) ?? -1)
         case "palette": model.setPalette(Int(arg) ?? 0)

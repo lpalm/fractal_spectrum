@@ -255,6 +255,47 @@ final class AppModel {
         camera.jump(to: Viewport.home(for: f))
     }
 
+    /// Locates the lowest-period minibrot in view (quadratic Mandelbrot only) and flies to it.
+    var searchingMinibrot = false
+
+    func findMinibrot() {
+        guard formula.family == .mandelbrot, formula.effectivePower == 2, !formula.julia else {
+            show("Mini-Mandelbrot search works in the Mandelbrot set")
+            return
+        }
+        guard !searchingMinibrot else { return }
+        searchingMinibrot = true
+        autopilot = false
+        stopTour()
+        show("Searching for a mini-Mandelbrot…")
+        let view = camera.view
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let found = AppModel.locateMinibrot(in: view)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.searchingMinibrot = false
+                guard let (target, p, ls) = found else {
+                    self.show("No mini-Mandelbrot found here — try zooming closer to the edge")
+                    return
+                }
+                self.renderer.snapColors = true
+                self.camera.fly(to: target)
+                self.show("Mini-Mandelbrot of period \(p) · " + ScaleFact.magnification((1 - ls) * log10(2.0)))
+            }
+        }
+    }
+
+    /// Minibrot (target view, period, log2 size) whose nucleus lies in or near `view`, if any.
+    nonisolated private static func locateMinibrot(in view: Viewport) -> (Viewport, Int, Double)? {
+        let period = Minibrot.period(center: view.center, log2Radius: view.log2Radius, maxPeriod: 2_000_000)
+        guard period > 0 else { return nil }
+        let prec = max(view.center.precision, Int(-view.log2Radius) * 2 + 160)
+        guard let n = Minibrot.nucleus(near: view.center, period: period, precision: prec) else { return nil }
+        let ls = Minibrot.log2Size(nucleus: n, period: period)
+        guard ls.isFinite, ls < view.log2Radius, n.minus(view.center).log2Abs < view.log2Radius + 2 else { return nil }
+        return (Viewport(center: n, log2Radius: ls + log2(2.6), rotation: view.rotation), period, ls)
+    }
+
     func toggleJulia() {
         var f = formula
         f.julia.toggle()
