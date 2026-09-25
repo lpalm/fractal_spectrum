@@ -562,8 +562,8 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     /// Largest iteration limit the smallest preview affords, from the latest preview (for the autopilot).
     private(set) var affordableIterations = Int.max
 
-    /// Applies the tuner's proposal, keeping the smallest preview within about one frame budget (at
-    /// least 12 ms: on faster displays detail is kept at 60 frames per second):
+    /// Applies the tuner's proposal, keeping the smallest preview within about one frame budget while
+    /// moving and two at rest (at least 12 ms each: on faster displays detail is kept at 60 frames per second):
     /// compute passes that run longer hold up presentation, and a preview's time is bounded below by
     /// its slowest samples, which run to the limit, so it grows with the limit. A smallest preview
     /// over two budgets lowers the limit. While the camera moves, increases are rate-limited:
@@ -576,16 +576,17 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         let frameMs = max(budgetMs, 12)
         let affordable = Double(iter.maxIter) * frameMs / max(smallestMs, 0.1)
         affordableIterations = Int(min(affordable, Double(IterationTuner.ceiling)))
+        let moving = camera.isAnimating
         var next = IterationTuner.adjust(maxIter: iter.maxIter, stats: stats, samples: samples)
         var overBudget = false
         if smallest && ms > 2 * frameMs {
             next = min(next, iter.maxIter, max(IterationTuner.floor, Int(max(Double(iter.maxIter) / 16, affordable))))
             overBudget = next < iter.maxIter
-        } else if next > iter.maxIter, Double(next) > affordable {
+        } else if next > iter.maxIter, Double(next) > affordable * (moving ? 1 : 2) {
+            // At rest the limit may rise up to what motion tolerates without a cut.
             next = iter.maxIter
         }
         let now = CACurrentMediaTime()
-        let moving = camera.isAnimating
         // Passes encoded before a change are ignored (scene version), so an over-budget cut needs no delay.
         let wait = overBudget ? 0 : next > iter.maxIter ? (moving ? 0.4 : 0.0) : 1.5
         if next != iter.maxIter && now - lastIterChange > wait {
