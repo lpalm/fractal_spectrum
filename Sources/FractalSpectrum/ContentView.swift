@@ -6,6 +6,11 @@ struct ContentView: View {
     @Bindable var model: AppModel
     @State private var thumbnails = Thumbnails()
 
+    private static let margin: CGFloat = 14
+    /// The status bar and tour captions are centred in the canvas area beside the sidebar, so that
+    /// they never overlap it, even in a narrow window.
+    private var sidebarInset: CGFloat { model.showUI ? Sidebar.width + ContentView.margin : 0 }
+
     var body: some View {
         ZStack {
             FractalCanvas(model: model)
@@ -18,13 +23,14 @@ struct ContentView: View {
                     Spacer(minLength: 0)
                     TopControls(model: model)
                 }
-                .padding(14)
+                .padding(ContentView.margin)
 
                 VStack {
                     Spacer()
                     HUDBar(model: model)
                         .padding(.bottom, 16)
                 }
+                .padding(.leading, sidebarInset)
                 .transition(.opacity)
             }
 
@@ -64,6 +70,7 @@ struct ContentView: View {
                         .padding(.bottom, model.showUI ? 86 : 40)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
+                .padding(.leading, sidebarInset)
                 .allowsHitTesting(false)
             }
 

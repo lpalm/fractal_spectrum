@@ -5,6 +5,7 @@ import FractalKit
 struct Sidebar: View {
     @Bindable var model: AppModel
     let thumbnails: Thumbnails
+    static let width: CGFloat = 304
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
@@ -18,7 +19,7 @@ struct Sidebar: View {
             }
             .padding(16)
         }
-        .frame(width: 304)
+        .frame(width: Sidebar.width)
         .frame(maxHeight: .infinity, alignment: .top)
         .panelGlass(in: RoundedRectangle(cornerRadius: 26, style: .continuous))
     }
