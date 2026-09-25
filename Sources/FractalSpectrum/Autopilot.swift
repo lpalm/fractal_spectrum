@@ -16,7 +16,7 @@ final class Autopilot {
     private let renderer: LiveRenderer
     /// Boundary detail the dive heads for, from the last probe.
     private var target: PlanePoint?
-    private var lastProbe = 0.0
+    private var lastProbeTime = 0.0
     /// The minibrot being approached.
     private var minibrot: FoundMinibrot?
     private var visitedPeriod = 0
@@ -31,18 +31,19 @@ final class Autopilot {
     private var zoomVelocity = 0.0
     private var spinVelocity = 0.0
     private var aimOffset = SIMD2<Double>(0, 0)
-    private var aimedAt: SIMD2<Double>?
+    private var lastGoal: SIMD2<Double>?
     private var searching = false
     /// Incremented by `reset`, so that searches started before it are ignored.
-    private var session = 0
+    private var searchGeneration = 0
 
+    /// A minibrot the dive heads for.
     private struct FoundMinibrot {
         let nucleus: PlanePoint
         let log2Size: Double
         let angle: Double
         let period: Int
-        /// Where the view is centred on arrival (the middle of the minibrot's body).
-        let frame: PlanePoint
+        /// Where the view is centred on arrival: the middle of the minibrot's body.
+        let arrivalCenter: PlanePoint
     }
 
     init(camera: Camera, renderer: LiveRenderer) {
@@ -61,9 +62,9 @@ final class Autopilot {
         zoomVelocity = 0
         spinVelocity = 0
         aimOffset = .zero
-        aimedAt = nil
+        lastGoal = nil
         searching = false
-        session += 1
+        searchGeneration += 1
     }
 
     // MARK: Motion
@@ -71,30 +72,30 @@ final class Autopilot {
     /// Advances the dive by one frame; false once the deepest supported zoom is reached.
     func step(dt: Double, flipY: Bool) -> Bool {
         let size = renderer.drawableSize
-        let centre = SIMD2(Double(size.x), Double(size.y)) * 0.5
+        let center = SIMD2(Double(size.x), Double(size.y)) * 0.5
         let now = CACurrentMediaTime()
-        if now - lastProbe > 0.3 {
-            lastProbe = now
+        if now - lastProbeTime > 0.3 {
+            lastProbeTime = now
             renderer.probeRequested = true
         }
         let dwelling = now < dwellUntil
         // Where the dive heads: the target, or the minibrot's body while approaching one.
-        var goal = centre
-        if !dwelling, let heading = minibrot?.frame ?? target {
-            let p = camera.view.pixel(of: heading, width: size.x, height: size.y, flipY: flipY)
-            if p.x < 0 || p.y < 0 || p.x > Double(size.x) || p.y > Double(size.y) {
+        var goal = center
+        if !dwelling, let heading = minibrot?.arrivalCenter ?? target {
+            let pixel = camera.view.pixel(of: heading, width: size.x, height: size.y, flipY: flipY)
+            if pixel.x < 0 || pixel.y < 0 || pixel.x > Double(size.x) || pixel.y > Double(size.y) {
                 if minibrot == nil { target = nil } else { minibrot = nil }
             } else {
-                goal = p
+                goal = pixel
             }
         }
         // A new goal keeps the aim where it was; the offset then fades, so the aim glides over.
-        if let last = aimedAt, simd_distance(last, goal) > 1 { aimOffset += last - goal }
+        if let last = lastGoal, simd_distance(last, goal) > 1 { aimOffset += last - goal }
         aimOffset *= exp(-dt / 0.6)
         let aim = goal + aimOffset
-        aimedAt = goal
+        lastGoal = goal
 
-        panVelocity += ((centre - aim) * 0.9 - panVelocity) * ease(dt, over: 0.4)
+        panVelocity += ((center - aim) * 0.9 - panVelocity) * ease(dt, over: 0.4)
         camera.pan(pixels: panVelocity * dt, width: size.x, height: size.y)
         let zoomGoal = now < backOutUntil ? -1.4 * speed : speed * (dwelling ? 0.15 : 1)
         zoomVelocity += (zoomGoal - zoomVelocity) * ease(dt, over: 0.5)
@@ -118,7 +119,7 @@ final class Autopilot {
     /// each eased remainder starts out at the dive's current velocity.
     func coast() {
         let size = renderer.drawableSize
-        let aim = aimedAt.map { $0 + aimOffset } ?? SIMD2(Double(size.x), Double(size.y)) * 0.5
+        let aim = lastGoal.map { $0 + aimOffset } ?? SIMD2(Double(size.x), Double(size.y)) * 0.5
         camera.fling(velocity: panVelocity)
         camera.zoom(log2Factor: -zoomVelocity / Camera.zoomEasing, at: aim, width: size.x, height: size.y, animated: true)
         camera.rotate(by: spinVelocity / Camera.rotationEasing, animated: true)
@@ -147,7 +148,7 @@ final class Autopilot {
             backOutUntil = now + 0.9
             return
         }
-        if formula.family == .mandelbrot, formula.effectivePower == 2, !formula.julia, !searching, now > dwellUntil {
+        if formula.supportsMinibrotSearch, !searching, now > dwellUntil {
             searchMinibrot(in: grid, flipY: flipY)
         }
         guard escaped.count > 20 else { return }
@@ -157,8 +158,8 @@ final class Autopilot {
         // Scores cells with escape times in the upper range by their surroundings: much interior
         // or noise means a dark or noisy view ahead. Away from the centre is preferred only while exploring.
         let r = max(2, min(grid.width, grid.height) / 16)
-        let cx = Double(grid.width) / 2, cy = Double(grid.height) / 2, diagonal = hypot(cx, cy)
-        let centreWeight = now < exploreUntil ? 0.6 : -0.9
+        let centerX = Double(grid.width) / 2, centerY = Double(grid.height) / 2, diagonal = hypot(centerX, centerY)
+        let centerWeight = now < exploreUntil ? 0.6 : -0.9
         var candidates: [(score: Double, x: Int, y: Int)] = []
         for y in r..<(grid.height - r) {
             for x in r..<(grid.width - r) {
@@ -177,7 +178,7 @@ final class Autopilot {
                     }
                 }
                 guard clear else { continue }
-                let score = (Double(n) - low) / (high - low) + centreWeight * hypot(Double(x) - cx, Double(y) - cy) / diagonal
+                let score = (Double(n) - low) / (high - low) + centerWeight * hypot(Double(x) - centerX, Double(y) - centerY) / diagonal
                     - 1.5 * Double(interior) / Double(cells) - 2 * max(0, Double(noiseSum) / Double(cells) - 0.25)
                 candidates.append((score, x, y))
             }
@@ -202,17 +203,17 @@ final class Autopilot {
             .map { grid.point(x: $0.x, y: $0.y, flipY: flipY) }
         guard !starts.isEmpty else { return }
         searching = true
-        let session = self.session, visited = visitedPeriod, view = grid.probe.view
+        let generation = searchGeneration, visited = visitedPeriod, view = grid.probe.view
         Task.detached(priority: .utility) { [weak self] in
             let found = Autopilot.findMinibrot(near: starts, view: view, excluding: visited)
             await MainActor.run { [weak self] in
-                guard let self, session == self.session else { return }
+                guard let self, generation == searchGeneration else { return }
                 searching = false
                 // The dive went on meanwhile: the minibrot must still be ahead and in view.
-                let v = camera.view
+                let currentView = camera.view
                 // Resolving a minibrot's surroundings takes some hundred times its period in iterations.
-                guard let found, minibrot == nil, found.log2Size < v.log2Radius - 1,
-                      found.nucleus.minus(v.center).log2Abs < v.log2Radius,
+                guard let found, minibrot == nil, found.log2Size < currentView.log2Radius - 1,
+                      found.nucleus.minus(currentView.center).log2Abs < currentView.log2Radius,
                       found.period * 200 <= renderer.affordableIterations else { return }
                 minibrot = found
             }
@@ -221,19 +222,16 @@ final class Autopilot {
 
     nonisolated private static func findMinibrot(near starts: [PlanePoint], view: Viewport,
                                                  excluding visited: Int) -> FoundMinibrot? {
-        let precision = max(view.center.precision, Int(-view.log2Radius) * 2 + 128)
         for start in starts {
-            let period = Minibrot.period(center: start, log2Radius: view.log2Radius - 8, maxPeriod: 1_000_000)
-            guard period > 0, period != visited,
-                  let nucleus = Minibrot.nucleus(near: start, period: period, precision: precision) else { continue }
-            let (log2Size, angle, cardioid) = Minibrot.size(nucleus: nucleus, period: period)
-            guard cardioid, log2Size.isFinite, log2Size < view.log2Radius - 3,
-                  nucleus.minus(view.center).log2Abs < view.log2Radius else { continue }
-            // body centre: nucleus + scale * (-0.6), scale = 2^log2Size e^(i angle)
-            let offset = ComplexExp(re: FloatExp.fromLog2(log2Size) * (-0.6 * cos(angle)),
-                                    im: FloatExp.fromLog2(log2Size) * (-0.6 * sin(angle)))
-            return FoundMinibrot(nucleus: nucleus, log2Size: log2Size, angle: angle, period: period,
-                            frame: nucleus.offset(by: offset, precision: precision))
+            guard let found = Minibrot.locate(near: start, searchLog2Radius: view.log2Radius - 8,
+                                              viewLog2Radius: view.log2Radius, maxPeriod: 1_000_000),
+                  found.period != visited, found.cardioid, found.log2Size.isFinite, found.log2Size < view.log2Radius - 3,
+                  found.nucleus.minus(view.center).log2Abs < view.log2Radius else { continue }
+            // the body's middle: nucleus + scale * (-0.6), scale = 2^log2Size e^(i angle)
+            let scale = FloatExp.fromLog2(found.log2Size)
+            let offset = ComplexExp(re: scale * (-0.6 * cos(found.angle)), im: scale * (-0.6 * sin(found.angle)))
+            return FoundMinibrot(nucleus: found.nucleus, log2Size: found.log2Size, angle: found.angle, period: found.period,
+                                 arrivalCenter: found.nucleus.offset(by: offset, precision: found.nucleus.precision))
         }
         return nil
     }
@@ -245,14 +243,14 @@ private struct ProbeGrid {
     let width: Int
     let height: Int
     /// Probe samples per cell side.
-    let cell: Int
+    let cellSize: Int
     let iterations: [UInt32]
 
     init(_ probe: LiveRenderer.Probe) {
         let cell = max(1, min(probe.width, probe.height) / 64)
         let width = (probe.width + cell - 1) / cell, height = (probe.height + cell - 1) / cell
         self.probe = probe
-        self.cell = cell
+        self.cellSize = cell
         self.width = width
         self.height = height
         iterations = (0..<height).flatMap { y in
@@ -303,14 +301,15 @@ private struct ProbeGrid {
 
     /// Plane point of cell coordinates.
     func point(x: Double, y: Double, flipY: Bool) -> PlanePoint {
-        let pixel = SIMD2(x * Double(cell) + 0.5, y * Double(cell) + 0.5) * Double(probe.drawable.x) / Double(probe.width)
-        return probe.view.point(atPixel: pixel, width: probe.drawable.x, height: probe.drawable.y, flipY: flipY)
+        let pixel = SIMD2(x * Double(cellSize) + 0.5, y * Double(cellSize) + 0.5) * Double(probe.drawableSize.x)
+            / Double(probe.width)
+        return probe.view.point(atPixel: pixel, width: probe.drawableSize.x, height: probe.drawableSize.y, flipY: flipY)
     }
 
     /// Cell of a plane point.
     func cell(of point: PlanePoint, flipY: Bool) -> (x: Int, y: Int) {
-        let pixel = probe.view.pixel(of: point, width: probe.drawable.x, height: probe.drawable.y, flipY: flipY)
-        return (Int(pixel.x * Double(probe.width) / Double(probe.drawable.x)) / cell,
-                Int(pixel.y * Double(probe.width) / Double(probe.drawable.x)) / cell)
+        let pixel = probe.view.pixel(of: point, width: probe.drawableSize.x, height: probe.drawableSize.y, flipY: flipY)
+        return (Int(pixel.x * Double(probe.width) / Double(probe.drawableSize.x)) / cellSize,
+                Int(pixel.y * Double(probe.width) / Double(probe.drawableSize.x)) / cellSize)
     }
 }

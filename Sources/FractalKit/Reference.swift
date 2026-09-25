@@ -7,7 +7,7 @@ public final class ReferenceOrbit: @unchecked Sendable {
     public let family: FractalFamily
     public let power: Int
     /// Julia parameter for orbits in a Julia set's plane; nil for parameter-plane orbits.
-    public let julia: SIMD2<Double>?
+    public let juliaParameter: SIMD2<Double>?
     /// Start of the orbit: c for parameter-plane orbits (which start at 0), z0 for Julia orbits.
     public let center: PlanePoint
     public let precision: Int
@@ -28,26 +28,34 @@ public final class ReferenceOrbit: @unchecked Sendable {
     private(set) var requestedLength = 0
 
     /// Table matching the current point count; touched only by the thread that encodes GPU work.
-    var bla: BLATable?
+    var blaTable: BLATable?
 
     init(formula: Formula, center: PlanePoint, precision: Int, capacity: Int) {
         family = formula.family
         power = formula.effectivePower
-        julia = formula.julia ? SIMD2(formula.juliaRe, formula.juliaIm) : nil
+        juliaParameter = formula.juliaParameter
         self.center = center.withPrecision(precision)
         self.precision = precision
         self.capacity = max(capacity, 1024)
         (pointsBuffer, extendedPointsBuffer) = ReferenceOrbit.makeBuffers(capacity: self.capacity)
-        if let j = julia {
-            let jre = HPFloat(j.x, precision: precision), jim = HPFloat(j.y, precision: precision)
-            computation = fs_ref_new(family.formulaID, Int32(power), 1, nil, nil, self.center.re.ptr, self.center.im.ptr,
-                                     jre.ptr, jim.ptr, precision)
-        } else {
-            computation = fs_ref_new(family.formulaID, Int32(power), 0, self.center.re.ptr, self.center.im.ptr,
-                                     nil, nil, nil, nil, precision)
-        }
+        computation = ReferenceOrbit.makeComputation(formula: formula, start: self.center, precision: precision)
         cancelFlag.pointee = 0
         progressCounter.pointee = 0
+    }
+
+    /// The C computation of the orbit that starts from `start`: c in the parameter plane (the orbit of 0),
+    /// z0 in a Julia set.
+    static func makeComputation(formula: Formula, start: PlanePoint, precision: Int) -> OpaquePointer {
+        let family = formula.family.formulaID, power = Int32(formula.effectivePower)
+        guard let julia = formula.juliaParameter else {
+            return withExtendedLifetime(start) {
+                fs_ref_new(family, power, start.re.handle, start.im.handle, nil, nil, precision)
+            }
+        }
+        let jre = HPFloat(julia.x, precision: precision), jim = HPFloat(julia.y, precision: precision)
+        return withExtendedLifetime((start, jre, jim)) {
+            fs_ref_new(family, power, start.re.handle, start.im.handle, jre.handle, jim.handle, precision)
+        }
     }
 
     deinit {
@@ -106,7 +114,9 @@ public final class ReferenceOrbit: @unchecked Sendable {
         let extendedPoints = extendedPointsBuffer.contents().assumingMemoryBound(to: FSRefExt.self)
         lock.unlock()
 
-        let computed = fs_ref_run(computation, length, points, extendedPoints, 256.0 * 256.0, cancelFlag, progressCounter)
+        // the orbit runs until it escapes the scenes' escape radius
+        let bailout = IterationSettings().bailout
+        let computed = fs_ref_run(computation, length, points, extendedPoints, bailout * bailout, cancelFlag, progressCounter)
 
         lock.withLock {
             count = computed
@@ -130,20 +140,19 @@ public final class ReferenceStore: @unchecked Sendable {
 
     public init() {}
 
+    /// Progress of the reference orbit being computed, for the HUD.
     public struct Status: Sendable {
         public var computing: Bool
         public var progress: Double
-        public var points: Int
     }
 
     public var status: Status {
         lock.withLock {
             for orbit in [pending, current].compactMap({ $0 }) where orbit.isComputing {
-                let points = orbit.progressCount
-                let progress = orbit.requestedLength > 0 ? Double(points) / Double(orbit.requestedLength) : 0
-                return Status(computing: true, progress: progress, points: points)
+                let progress = orbit.requestedLength > 0 ? Double(orbit.progressCount) / Double(orbit.requestedLength) : 0
+                return Status(computing: true, progress: progress)
             }
-            return Status(computing: false, progress: 1, points: current?.snapshot.count ?? 0)
+            return Status(computing: false, progress: 1)
         }
     }
 
@@ -151,15 +160,14 @@ public final class ReferenceStore: @unchecked Sendable {
     /// doublings of the view radius from the view centre.
     private func suits(_ orbit: ReferenceOrbit, _ formula: Formula, _ view: Viewport, precision: Int, slack: Double) -> Bool {
         guard orbit.family == formula.family, orbit.power == formula.effectivePower, orbit.precision >= precision,
-              orbit.julia == (formula.julia ? SIMD2(formula.juliaRe, formula.juliaIm) : nil) else { return false }
+              orbit.juliaParameter == formula.juliaParameter else { return false }
         return view.center.minus(orbit.center).log2Abs <= view.log2Radius + slack
     }
 
     /// Orbit of the critical point 0 for a Julia set's parameter: the target Julia samples rebase onto.
     /// Returns nil while it is being computed (unless `blocking`).
     func criticalOrbit(formula: Formula, precision: Int, length: Int, blocking: Bool) -> ReferenceOrbit? {
-        var parameterPlane = formula
-        parameterPlane.julia = false
+        let parameterPlane = formula.parameterPlane
         let c = SIMD2(formula.juliaRe, formula.juliaIm)
         let orbit: ReferenceOrbit = lock.withLock {
             if let existing = critical, existing.family == parameterPlane.family,
@@ -168,7 +176,7 @@ public final class ReferenceStore: @unchecked Sendable {
                 return existing
             }
             critical?.cancel()
-            let bits = precision + 64
+            let bits = precision + 64   // headroom: the orbit keeps serving some 64 doublings deeper
             let orbit = ReferenceOrbit(formula: parameterPlane,
                                        center: PlanePoint(re: HPFloat(c.x, precision: bits), im: HPFloat(c.y, precision: bits)),
                                        precision: bits, capacity: length + 1)
@@ -197,7 +205,7 @@ public final class ReferenceStore: @unchecked Sendable {
         // A new orbit anchored at the focus gets the precision of the destination, so it serves the whole motion.
         var focusView = view
         if let f = focus { focusView.log2Radius = min(f.log2Radius, view.log2Radius) }
-        let newPrecision = max(precision, focusView.requiredPrecision(minSide: minSide)) + 64
+        let newPrecision = max(precision, focusView.requiredPrecision(minSide: minSide)) + 64   // headroom, as above
         func suits(_ orbit: ReferenceOrbit, slack: Double) -> Bool {
             self.suits(orbit, formula, view, precision: precision, slack: slack)
         }
@@ -320,7 +328,7 @@ final class BLATable {
         }
 
         let gpu = GPU.shared
-        var key = GPU.PipelineKey(name: "bla_init", formula: formula.family.formulaID, power: Int32(formula.effectivePower))
+        var key = GPU.PipelineKey(name: "bla_init", family: formula.family.formulaID, power: Int32(formula.effectivePower))
         let initPipeline = gpu.pipeline(key)
         key.name = "bla_merge"
         let mergePipeline = gpu.pipeline(key)
@@ -331,15 +339,14 @@ final class BLATable {
         encoder.setBuffer(log2MinZ, offset: 0, index: 5)
         encoder.setBuffer(maxRadius2, offset: 0, index: 6)
         gpu.dispatch1D(encoder, gpu.pipeline("bla_reset_max"), count: 1)
-        var params = FSBLABuildParams(count: UInt32(levelZeroCount), srcOffset: 0, dstOffset: 0, srcCount: 0,
-                                      log2Eps: Float(log2Eps), log2C: Float(max(log2C, -1e30)), pad0: 0, pad1: 0)
+        var params = FSBLABuildParams(count: UInt32(levelZeroCount), srcOffset: 0, dstOffset: 0,
+                                      log2Eps: Float(log2Eps), log2C: Float(max(log2C, -1e30)), pad0: 0, pad1: 0, pad2: 0)
         encoder.setBytes(&params, length: MemoryLayout<FSBLABuildParams>.stride, index: 4)
         gpu.dispatch1D(encoder, initPipeline, count: levelZeroCount)
         // each level merges pairs of the level below
         for level in 1..<offsets.count {
             params.count = counts[level]
             params.srcOffset = offsets[level - 1]
-            params.srcCount = counts[level - 1]
             params.dstOffset = offsets[level]
             encoder.setBytes(&params, length: MemoryLayout<FSBLABuildParams>.stride, index: 4)
             gpu.dispatch1D(encoder, mergePipeline, count: Int(counts[level]))
@@ -351,15 +358,7 @@ extension Formula {
     /// The first `count` points of the orbit of `point` (z_0 = 0 with c = point, or z_0 = point in a
     /// Julia set), in double precision, ending early once |z| exceeds 4 (for display).
     public func orbit(of point: PlanePoint, count: Int) -> [SIMD2<Float>] {
-        let p = point.withPrecision(53)
-        let computation: OpaquePointer
-        if julia {
-            let jre = HPFloat(juliaRe, precision: 53), jim = HPFloat(juliaIm, precision: 53)
-            computation = fs_ref_new(family.formulaID, Int32(effectivePower), 1, nil, nil, p.re.ptr, p.im.ptr,
-                                     jre.ptr, jim.ptr, 53)
-        } else {
-            computation = fs_ref_new(family.formulaID, Int32(effectivePower), 0, p.re.ptr, p.im.ptr, nil, nil, nil, nil, 53)
-        }
+        let computation = ReferenceOrbit.makeComputation(formula: self, start: point.withPrecision(53), precision: 53)
         defer { fs_ref_free(computation) }
         var points = [SIMD2<Float>](repeating: .zero, count: count)
         var extendedPoints = [FSRefExt](repeating: FSRefExt(), count: count)

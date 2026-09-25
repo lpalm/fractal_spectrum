@@ -4,37 +4,37 @@ import CFractal
 /// Immutable arbitrary-precision real number (MPFR). Operations return new values.
 public final class HPFloat: @unchecked Sendable {
     /// The number in the C library, owned by this object.
-    let ptr: OpaquePointer
+    let handle: OpaquePointer
 
-    private init(ptr: OpaquePointer) { self.ptr = ptr }
+    private init(handle: OpaquePointer) { self.handle = handle }
 
     public convenience init(_ value: Double, precision: Int = 64) {
-        self.init(ptr: fs_hp_new(precision))
-        fs_hp_set_d(ptr, value)
+        self.init(handle: fs_hp_new(precision))
+        fs_hp_set_d(handle, value)
     }
 
     public convenience init?(_ text: String, precision: Int) {
-        self.init(ptr: fs_hp_new(precision))
+        self.init(handle: fs_hp_new(precision))
         let trimmed = text.trimmingCharacters(in: .whitespaces)
-        if trimmed.isEmpty || fs_hp_set_str(ptr, trimmed) != 0 { return nil }
+        if trimmed.isEmpty || fs_hp_set_str(handle, trimmed) != 0 { return nil }
     }
 
-    deinit { fs_hp_free(ptr) }
+    deinit { fs_hp_free(handle) }
 
-    public var precision: Int { fs_hp_prec(ptr) }
+    public var precision: Int { fs_hp_prec(handle) }
 
-    public var doubleValue: Double { fs_hp_get_d(ptr) }
+    public var doubleValue: Double { fs_hp_get_d(handle) }
 
     /// Same value at a different precision.
     public func withPrecision(_ bits: Int) -> HPFloat {
-        HPFloat(ptr: fs_hp_clone(ptr, bits))
+        HPFloat(handle: fs_hp_clone(handle, bits))
     }
 
     /// self + m * 2^e at `precision` bits (defaults to the current precision).
     public func adding(_ m: Double, exp e: Int, precision: Int? = nil) -> HPFloat {
-        let r = fs_hp_clone(ptr, precision ?? self.precision)!
+        let r = fs_hp_clone(handle, precision ?? self.precision)!
         fs_hp_add_2exp(r, m, e)
-        return HPFloat(ptr: r)
+        return HPFloat(handle: r)
     }
 
     public func adding(_ x: FloatExp, precision: Int? = nil) -> HPFloat {
@@ -44,22 +44,22 @@ public final class HPFloat: @unchecked Sendable {
     /// self - other in extended range.
     public func minus(_ other: HPFloat) -> FloatExp {
         var e = 0
-        let m = fs_hp_diff_2exp(ptr, other.ptr, &e)
+        let m = fs_hp_diff_2exp(handle, other.handle, &e)
         return FloatExp(m, e)
     }
 
     /// self + (other - self) * t at `precision` bits.
     public func lerp(to other: HPFloat, _ t: Double, precision: Int) -> HPFloat {
         let r = fs_hp_new(precision)!
-        fs_hp_lerp(r, ptr, other.ptr, t)
-        return HPFloat(ptr: r)
+        fs_hp_lerp(r, handle, other.handle, t)
+        return HPFloat(handle: r)
     }
 
     /// Scientific notation with `digits` significant digits.
     public func string(digits: Int) -> String {
-        guard let c = fs_hp_to_str(ptr, Int32(max(digits, 1))) else { return "0" }
-        defer { fs_free(c) }
-        return String(cString: c)
+        guard let cString = fs_hp_to_str(handle, Int32(max(digits, 1))) else { return "0" }
+        defer { fs_free(cString) }
+        return String(cString: cString)
     }
 }
 
@@ -107,7 +107,7 @@ public struct PlanePoint: @unchecked Sendable {
 }
 
 /// Real number m * 2^e with a double mantissa, for host-side extended-range arithmetic.
-public struct FloatExp: Sendable, CustomStringConvertible {
+public struct FloatExp: Sendable {
     public var m: Double
     public var e: Int
 
@@ -125,9 +125,6 @@ public struct FloatExp: Sendable, CustomStringConvertible {
 
     public static let zero = FloatExp(0)
 
-    /// log2 |value|; -infinity for zero.
-    public var log2Abs: Double { m == 0 ? -.infinity : log2(abs(m)) + Double(e) }
-
     /// 2^l (zero when l is not finite).
     public static func fromLog2(_ l: Double) -> FloatExp {
         guard l.isFinite else { return .zero }
@@ -135,23 +132,7 @@ public struct FloatExp: Sendable, CustomStringConvertible {
         return FloatExp(exp2(l - i), Int(i))
     }
 
-    public static func + (a: FloatExp, b: FloatExp) -> FloatExp {
-        if a.m == 0 { return b }
-        if b.m == 0 { return a }
-        let e = max(a.e, b.e)
-        return FloatExp(scalbn(a.m, a.e - e) + scalbn(b.m, b.e - e), e)
-    }
-
-    public static prefix func - (a: FloatExp) -> FloatExp { FloatExp(-a.m, a.e) }
-    public static func - (a: FloatExp, b: FloatExp) -> FloatExp { a + (-b) }
-    public static func * (a: FloatExp, b: FloatExp) -> FloatExp { FloatExp(a.m * b.m, a.e + b.e) }
     public static func * (a: FloatExp, b: Double) -> FloatExp { FloatExp(a.m * b, a.e) }
-
-    public var description: String {
-        if m == 0 { return "0" }
-        let (mant, ex) = scientific(log10: log2Abs * log10(2.0), digits: 4)
-        return String(format: "%.4fe%+d", m < 0 ? -mant : mant, ex)
-    }
 }
 
 /// Exponent the kernels use for exact zeros (FS_ZERO_EXP in ShaderTypes.h).
@@ -166,8 +147,6 @@ public struct ComplexExp: Sendable {
         self.re = re
         self.im = im
     }
-
-    public static let zero = ComplexExp(re: .zero, im: .zero)
 
     /// The larger exponent of the non-zero components; nil for zero.
     private var sharedExponent: Int? {
@@ -190,10 +169,6 @@ public struct ComplexExp: Sendable {
         guard let e = sharedExponent else { return (SIMD2(0, 0), zeroExponent) }
         let x = scalbn(re.m, re.e - e), y = scalbn(im.m, im.e - e)
         return (SIMD2(Float(x), Float(y)), Int32(clamping: e))
-    }
-
-    public static func + (a: ComplexExp, b: ComplexExp) -> ComplexExp {
-        ComplexExp(re: a.re + b.re, im: a.im + b.im)
     }
 
     public static func * (a: ComplexExp, b: Double) -> ComplexExp {

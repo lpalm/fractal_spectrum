@@ -1,4 +1,5 @@
-// High-precision arithmetic (MPFR) and reference-orbit computation for perturbation rendering.
+// Arbitrary-precision numbers (MPFR), reference orbits for perturbation rendering, minibrot location,
+// and a full-precision CPU iteration to verify the GPU against.
 #ifndef CFRACTAL_H
 #define CFRACTAL_H
 
@@ -29,12 +30,10 @@ void fs_free(void *p);
 typedef struct FSRefJob FSRefJob;
 
 // formula: FS_FORMULA_*; power: exponent for the Mandelbrot family.
-// Non-Julia: orbit of 0 under z -> f(z) + (cre + i cim).
-// Julia: orbit of (zre + i zim) under z -> f(z) + (jre + i jim).
-FSRefJob *fs_ref_new(int formula, int power, int julia,
-                     const FSHP *cre, const FSHP *cim,
-                     const FSHP *zre, const FSHP *zim,
-                     const FSHP *jre, const FSHP *jim, long prec);
+// The orbit of 0 under z -> f(z) + c with c = (re + i im), or, given a Julia parameter (jre, jim), the
+// orbit of z0 = (re + i im) under z -> f(z) + (jre + i jim).
+FSRefJob *fs_ref_new(int formula, int power, const FSHP *re, const FSHP *im, const FSHP *jre, const FSHP *jim,
+                     long prec);
 void fs_ref_free(FSRefJob *job);
 
 // Continues the orbit until `target` points exist, the orbit escapes, or *cancel becomes non-zero.
@@ -51,9 +50,9 @@ long fs_find_nucleus(const FSHP *cre, const FSHP *cim, long period, long maxStep
 double fs_nucleus_size(const FSHP *cre, const FSHP *cim, long period, double *angle, int *cardioid);
 
 // ---- CPU oracle for verification ----
-// Iterates one pixel at full precision; returns the escape iteration or maxIter. With (jre, jim) the
-// point is the Julia starting value z0 = (cre, cim) for parameter (jre, jim).
-long fs_oracle_pixel(int formula, int power, const FSHP *cre, const FSHP *cim, const FSHP *jre, const FSHP *jim,
+// Iterates one point at full precision; returns the escape iteration or maxIter. As for fs_ref_new,
+// (re, im) is c, or z0 when a Julia parameter (jre, jim) is given.
+long fs_oracle_pixel(int formula, int power, const FSHP *re, const FSHP *im, const FSHP *jre, const FSHP *jim,
                      long maxIter, double bailout2, double *smoothFrac);
 
 #ifdef __cplusplus

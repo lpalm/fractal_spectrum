@@ -6,20 +6,21 @@
 // Lowest period whose atom domain intersects the disk |c - c0| < r (ball iteration: the image of the disk
 // under z -> z^2 + c contains 0). Returns 0 when none is found within maxPeriod.
 long fs_find_period(const FSHP *cre, const FSHP *cim, double log2r, long maxPeriod) {
-    long prec = mpfr_get_prec(cre->v) + 16;
+    long prec = mpfr_get_prec(cre->value) + 16;
     mpfr_t x, y, t0, t1, t2, cx, cy;
     mpfr_inits2(prec, x, y, t0, t1, t2, cx, cy, (mpfr_ptr)0);
-    mpfr_set(cx, cre->v, MPFR_RNDN);
-    mpfr_set(cy, cim->v, MPFR_RNDN);
+    mpfr_set(cx, cre->value, MPFR_RNDN);
+    mpfr_set(cy, cim->value, MPFR_RNDN);
     mpfr_set_zero(x, 1);
     mpfr_set_zero(y, 1);
     // disk radius R_n tracked as log2: R_n = 2|z_{n-1}| R_{n-1} + R_{n-1}^2 + r, z_n = z_{n-1}^2 + c
     double lR = -1e300, lzPrev = -1e300;
     long found = 0;
     for (long n = 1; n <= maxPeriod; n++) {
-        double a = 1 + lzPrev + lR, b = 2 * lR, c = log2r;
-        double mx = fmax(a, fmax(b, c));
-        lR = mx + log2(exp2(a - mx) + exp2(b - mx) + exp2(c - mx));
+        // log2 of the three terms of R_n, summed without overflow
+        double a = 1 + lzPrev + lR, b = 2 * lR;
+        double mx = fmax(a, fmax(b, log2r));
+        lR = mx + log2(exp2(a - mx) + exp2(b - mx) + exp2(log2r - mx));
         mpfr_sqr(t0, x, MPFR_RNDN);
         mpfr_sqr(t1, y, MPFR_RNDN);
         mpfr_mul(t2, x, y, MPFR_RNDN);
@@ -42,11 +43,11 @@ long fs_find_period(const FSHP *cre, const FSHP *cim, double log2r, long maxPeri
 // Newton iteration for a nucleus of the given period starting at (cre, cim); writes the result
 // into (outRe, outIm). Returns the number of Newton steps taken, or -1 on failure.
 long fs_find_nucleus(const FSHP *cre, const FSHP *cim, long period, long maxSteps, FSHP *outRe, FSHP *outIm) {
-    long prec = mpfr_get_prec(outRe->v);
+    long prec = mpfr_get_prec(outRe->value);
     mpfr_t cx, cy, x, y, dx, dy, t0, t1, t2, nx, ny, den;
     mpfr_inits2(prec, cx, cy, x, y, dx, dy, t0, t1, t2, nx, ny, den, (mpfr_ptr)0);
-    mpfr_set(cx, cre->v, MPFR_RNDN);
-    mpfr_set(cy, cim->v, MPFR_RNDN);
+    mpfr_set(cx, cre->value, MPFR_RNDN);
+    mpfr_set(cy, cim->value, MPFR_RNDN);
     long steps = -1;
     for (long k = 0; k < maxSteps; k++) {
         mpfr_set_zero(x, 1);
@@ -94,62 +95,62 @@ long fs_find_nucleus(const FSHP *cre, const FSHP *cim, long period, long maxStep
         mpfr_hypot(t0, nx, ny, MPFR_RNDN);
         if (mpfr_zero_p(t0) || mpfr_get_exp(t0) < -(prec - 8)) break;
     }
-    mpfr_set(outRe->v, cx, MPFR_RNDN);
-    mpfr_set(outIm->v, cy, MPFR_RNDN);
+    mpfr_set(outRe->value, cx, MPFR_RNDN);
+    mpfr_set(outIm->value, cy, MPFR_RNDN);
     mpfr_clears(cx, cy, x, y, dx, dy, t0, t1, t2, nx, ny, den, (mpfr_ptr)0);
     return steps;
 }
 
 // Extended-range complex number (re + i im) * 2^e with max(|re|, |im|) in [0.5, 1), or zero.
-typedef struct { double re, im; long e; } xc;
+typedef struct { double re, im; long e; } xcomplex;
 
 static double scale2(double x, long k) { return k < -2000 ? 0 : ldexp(x, (int)k); }
 
-static xc xc_make(double re, double im, long e) {
+static xcomplex xc_norm(double re, double im, long e) {
     double m = fmax(fabs(re), fabs(im));
-    if (m == 0) return (xc){0, 0, 0};
+    if (m == 0) return (xcomplex){0, 0, 0};
     int k;
     frexp(m, &k);
-    return (xc){ldexp(re, -k), ldexp(im, -k), e + k};
+    return (xcomplex){ldexp(re, -k), ldexp(im, -k), e + k};
 }
 
-static xc xc_mul(xc a, xc b) { return xc_make(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re, a.e + b.e); }
+static xcomplex xc_mul(xcomplex a, xcomplex b) { return xc_norm(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re, a.e + b.e); }
 
-static xc xc_add(xc a, xc b) {
+static xcomplex xc_add(xcomplex a, xcomplex b) {
     if (a.re == 0 && a.im == 0) return b;
     if (b.re == 0 && b.im == 0) return a;
     long e = a.e > b.e ? a.e : b.e;
-    return xc_make(scale2(a.re, a.e - e) + scale2(b.re, b.e - e), scale2(a.im, a.e - e) + scale2(b.im, b.e - e), e);
+    return xc_norm(scale2(a.re, a.e - e) + scale2(b.re, b.e - e), scale2(a.im, a.e - e) + scale2(b.im, b.e - e), e);
 }
 
-static xc xc_div(xc a, xc b) {
+static xcomplex xc_div(xcomplex a, xcomplex b) {
     double d = b.re * b.re + b.im * b.im;
-    return xc_make((a.re * b.re + a.im * b.im) / d, (a.im * b.re - a.re * b.im) / d, a.e - b.e);
+    return xc_norm((a.re * b.re + a.im * b.im) / d, (a.im * b.re - a.re * b.im) / d, a.e - b.e);
 }
 
-static xc xc_from_mpfr(mpfr_t x, mpfr_t y) {
+static xcomplex xc_from_mpfr(mpfr_t x, mpfr_t y) {
     long ex = 0, ey = 0;
     double mx = mpfr_zero_p(x) ? 0 : mpfr_get_d_2exp(&ex, x, MPFR_RNDN);
     double my = mpfr_zero_p(y) ? 0 : mpfr_get_d_2exp(&ey, y, MPFR_RNDN);
-    return xc_add(xc_make(mx, 0, ex), xc_make(0, my, ey));
+    return xc_add(xc_norm(mx, 0, ex), xc_norm(0, my, ey));
 }
 
-static double xc_log2abs(xc a) { return 0.5 * log2(a.re * a.re + a.im * a.im) + a.e; }
+static double xc_log2abs(xcomplex a) { return 0.5 * log2(a.re * a.re + a.im * a.im) + a.e; }
 
 // Size and shape estimates of the minibrot with the given nucleus and period (after Heiland-Allen):
 // it is approximately nucleus + s * M with s = 1 / (b l^2), where l is the product of 2 z_i and b the
 // sum of 1 / partial products, i = 1 .. p-1. Returns log2 |s|, writes arg s (the rotation) to *angle
 // and whether the component is a cardioid (a minibrot) rather than a disc (a bulb) to *cardioid.
 double fs_nucleus_size(const FSHP *cre, const FSHP *cim, long period, double *angle, int *cardioid) {
-    long prec = mpfr_get_prec(cre->v) + 16;
+    long prec = mpfr_get_prec(cre->value) + 16;
     mpfr_t x, y, t0, t1, t2, cx, cy;
     mpfr_inits2(prec, x, y, t0, t1, t2, cx, cy, (mpfr_ptr)0);
-    mpfr_set(cx, cre->v, MPFR_RNDN);
-    mpfr_set(cy, cim->v, MPFR_RNDN);
+    mpfr_set(cx, cre->value, MPFR_RNDN);
+    mpfr_set(cy, cim->value, MPFR_RNDN);
     mpfr_set_zero(x, 1);
     mpfr_set_zero(y, 1);
-    const xc one = xc_make(1, 0, 0), two = xc_make(2, 0, 0);
-    xc l = one, b = one, dc = one, dcdc = {0, 0, 0}, dcdz = {0, 0, 0};
+    const xcomplex one = xc_norm(1, 0, 0), two = xc_norm(2, 0, 0);
+    xcomplex l = one, b = one, dc = one, dcdc = {0, 0, 0}, dcdz = {0, 0, 0};
     for (long i = 1; i < period; i++) {
         mpfr_sqr(t0, x, MPFR_RNDN);
         mpfr_sqr(t1, y, MPFR_RNDN);
@@ -158,7 +159,7 @@ double fs_nucleus_size(const FSHP *cre, const FSHP *cim, long period, double *an
         mpfr_sub(x, t0, t1, MPFR_RNDN);
         mpfr_add(x, x, cx, MPFR_RNDN);
         mpfr_add(y, t2, cy, MPFR_RNDN);
-        xc z = xc_from_mpfr(x, y);
+        xcomplex z = xc_from_mpfr(x, y);
         // derivatives of z_p with respect to c and z (dz equals l), for the shape estimate
         dcdc = xc_mul(two, xc_add(xc_mul(z, dcdc), xc_mul(dc, dc)));
         dcdz = xc_mul(two, xc_add(xc_mul(z, dcdz), xc_mul(dc, l)));
@@ -168,10 +169,10 @@ double fs_nucleus_size(const FSHP *cre, const FSHP *cim, long period, double *an
         b = xc_add(b, xc_div(one, l));
     }
     mpfr_clears(x, y, t0, t1, t2, cx, cy, (mpfr_ptr)0);
-    // e = -(dcdc / (2 dc) + dcdz / dz) / (dc dz) is near 0 for cardioids and near 1 for discs
-    xc e = xc_div(xc_add(xc_div(dcdc, xc_mul(two, dc)), xc_div(dcdz, l)), xc_mul(dc, l));
-    double er = -scale2(e.re, e.e), ei = -scale2(e.im, e.e);
-    *cardioid = er * er + ei * ei < (er - 1) * (er - 1) + ei * ei;
+    // the shape -(dcdc / (2 dc) + dcdz / dz) / (dc dz) is near 0 for cardioids and near 1 for discs
+    xcomplex shape = xc_div(xc_add(xc_div(dcdc, xc_mul(two, dc)), xc_div(dcdz, l)), xc_mul(dc, l));
+    double sr = -scale2(shape.re, shape.e), si = -scale2(shape.im, shape.e);
+    *cardioid = sr * sr + si * si < (sr - 1) * (sr - 1) + si * si;
     *angle = -(atan2(b.im, b.re) + 2 * atan2(l.im, l.re));
     return -(xc_log2abs(b) + 2 * xc_log2abs(l));
 }

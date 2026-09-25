@@ -54,6 +54,28 @@ public struct Formula: Hashable, Codable, Sendable {
         let name = family == .mandelbrot && effectivePower > 2 ? "Multibrot z^\(effectivePower)" : family.displayName
         return julia ? name + " Julia" : name
     }
+
+    /// The Julia parameter of a Julia set; nil in the parameter plane.
+    public var juliaParameter: SIMD2<Double>? { julia ? SIMD2(juliaRe, juliaIm) : nil }
+
+    /// The same family in the parameter plane.
+    public var parameterPlane: Formula {
+        var formula = self
+        formula.julia = false
+        return formula
+    }
+
+    /// The Julia set of this family for the parameter re + i im.
+    public func juliaSet(re: Double, im: Double) -> Formula {
+        var formula = self
+        formula.julia = true
+        formula.juliaRe = re
+        formula.juliaIm = im
+        return formula
+    }
+
+    /// Minibrots can be located (by period detection and Newton's method) in the quadratic Mandelbrot set.
+    public var supportsMinibrotSearch: Bool { family == .mandelbrot && effectivePower == 2 && !julia }
 }
 
 /// What part of the plane is on screen.
@@ -83,15 +105,20 @@ public struct Viewport: @unchecked Sendable {
         }
     }
 
-    /// Magnification relative to a view of radius 2.
-    public var zoomLog10: Double { (1 - log2Radius) * log10(2.0) }
+    /// log10 of the magnification, relative to a view of radius 2.
+    public var zoomLog10: Double { Viewport.zoomLog10(log2Radius: log2Radius) }
+
+    /// log10 of the magnification of a view of radius 2^log2Radius.
+    public static func zoomLog10(log2Radius: Double) -> Double { (1 - log2Radius) * log10(2.0) }
+
+    /// log2 of the radius of a view magnified 10^zoomLog10 times.
+    public static func log2Radius(zoomLog10: Double) -> Double { 1 - zoomLog10 / log10(2.0) }
 
     /// Magnification for display: "123.4×" or "1.23e45".
     public var zoomText: String {
-        let l = zoomLog10
-        if l < 4 { return String(format: "%.1f×", pow(10, l)) }
-        let (m, e) = scientific(log10: l, digits: 2)
-        return String(format: "%.2fe%d", m, e)
+        if zoomLog10 < 4 { return String(format: "%.1f×", pow(10, zoomLog10)) }
+        let (mantissa, exponent) = scientific(log10: zoomLog10, digits: 2)
+        return String(format: "%.2fe%d", mantissa, exponent)
     }
 
     /// Bits of precision needed for positions at this zoom on a `minSide`-sample grid.
@@ -153,11 +180,11 @@ public struct ColorSettings: Codable, Sendable, Hashable {
 public struct FractalScene: @unchecked Sendable {
     public var formula: Formula
     public var view: Viewport
-    public var iter: IterationSettings
+    public var iteration: IterationSettings
 
-    public init(formula: Formula, view: Viewport, iter: IterationSettings) {
+    public init(formula: Formula, view: Viewport, iteration: IterationSettings) {
         self.formula = formula
         self.view = view
-        self.iter = iter
+        self.iteration = iteration
     }
 }

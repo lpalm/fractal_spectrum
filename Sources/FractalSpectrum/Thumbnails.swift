@@ -32,10 +32,10 @@ final class Thumbnails {
         let formula = Formula(family: family)
         var color = ColorSettings()
         color.palette = Thumbnails.familyPalettes[family] ?? 0
-        var iter = IterationSettings()
-        iter.maxIter = 400
+        var iteration = IterationSettings()
+        iteration.maxIter = 400
         request(Thumbnails.key(for: family), source: Thumbnails.json(formula) + Thumbnails.json(color),
-                scene: FractalScene(formula: formula, view: Viewport.home(for: formula), iter: iter), color: color)
+                scene: FractalScene(formula: formula, view: Viewport.home(for: formula), iteration: iteration), color: color)
     }
 
     /// A place's tile, in its own palette if it has one.
@@ -43,10 +43,10 @@ final class Thumbnails {
         guard let view = location.viewport else { return }
         var color = color
         if let palette = location.palette { color.palette = palette }
-        var iter = IterationSettings()
-        iter.maxIter = location.maxIter ?? 1000
+        var iteration = IterationSettings()
+        iteration.maxIter = location.maxIter ?? 1000
         request(Thumbnails.key(for: location), source: Thumbnails.json(location) + Thumbnails.json(color),
-                scene: FractalScene(formula: location.formula, view: view, iter: iter), color: color)
+                scene: FractalScene(formula: location.formula, view: view, iteration: iteration), color: color)
     }
 
     /// `source` describes the scene and colours (it names the cache file together with the renderer version).

@@ -125,22 +125,25 @@ public final class PaletteBank: @unchecked Sendable {
     public var count: Int { Palette.all.count }
 
     public init(device: MTLDevice) {
-        let w = PaletteBank.width, h = Palette.all.count
-        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: w, height: h, mipmapped: false)
-        desc.usage = .shaderRead
-        texture = device.makeTexture(descriptor: desc)!
-        for p in Palette.all {
-            let row = p.samples(w).flatMap { [Float16($0.x), Float16($0.y), Float16($0.z), Float16(1)] }
+        let width = PaletteBank.width
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: width,
+                                                                  height: Palette.all.count, mipmapped: false)
+        descriptor.usage = .shaderRead
+        texture = device.makeTexture(descriptor: descriptor)!
+        for palette in Palette.all {
+            let row = palette.samples(width).flatMap { [Float16($0.x), Float16($0.y), Float16($0.z), Float16(1)] }
             row.withUnsafeBytes { raw in
-                texture.replace(region: MTLRegionMake2D(0, p.id, w, 1), mipmapLevel: 0,
-                                withBytes: raw.baseAddress!, bytesPerRow: w * 8)
+                texture.replace(region: MTLRegionMake2D(0, palette.id, width, 1), mipmapLevel: 0,
+                                withBytes: raw.baseAddress!, bytesPerRow: width * 8)
             }
         }
     }
+}
 
-    /// sRGB preview colours for UI swatches.
-    public static func swatch(_ palette: Palette, count: Int) -> [SIMD3<Double>] {
-        palette.samples(count).map {
+extension Palette {
+    /// sRGB colours (0 to 1) sampled along the cycle, for swatches in the interface.
+    public func swatchColors(count: Int) -> [SIMD3<Double>] {
+        samples(count).map {
             SIMD3(OKLab.linearToSrgb(Double($0.x)), OKLab.linearToSrgb(Double($0.y)), OKLab.linearToSrgb(Double($0.z)))
         }
     }

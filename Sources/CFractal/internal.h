@@ -5,7 +5,7 @@
 #include "CFractal.h"
 
 struct FSHP {
-    mpfr_t v;
+    mpfr_t value;
 };
 
 #endif

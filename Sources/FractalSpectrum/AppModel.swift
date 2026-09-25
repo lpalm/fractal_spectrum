@@ -37,22 +37,22 @@ final class AppModel {
     let engine = Engine()
     let camera: Camera
     @ObservationIgnored let renderer: LiveRenderer
-    @ObservationIgnored let pilot: Autopilot
+    @ObservationIgnored let autopilot: Autopilot
     let export = ExportController()
 
     var formula = Formula() { didSet { formulaChanged(from: oldValue) } }
     var color = ColorSettings() { didSet { renderer.color = color } }
-    var iter = IterationSettings() { didSet { renderer.iter = iter } }
+    var iteration = IterationSettings() { didSet { renderer.iteration = iteration } }
     var quality = Quality.high {
         didSet {
             renderer.samplesPerPixel = quality.samples
-            iter.blaLog2Eps = quality.blaLog2Eps
+            iteration.blaLog2Eps = quality.blaLog2Eps
         }
     }
-    var autopilot = false {
+    var autopilotEngaged = false {
         didSet {
-            if autopilot { camera.cancelFlight() } else if oldValue { pilot.coast() }
-            pilot.reset()
+            if autopilotEngaged { camera.cancelFlight() } else if oldValue { autopilot.coast() }
+            autopilot.reset()
         }
     }
     /// Lets the palette drift slowly ("Animate colours").
@@ -68,7 +68,9 @@ final class AppModel {
     }
 
     // Interface
-    var showUI = true
+    var showUI = true {
+        didSet { if oldValue && !showUI { announce("Space brings the interface back") } }
+    }
     var showHelp = false
     var showExport = false
     var showGoTo = false
@@ -113,27 +115,27 @@ final class AppModel {
         let formula = Formula()
         camera = Camera(view: Viewport.home(for: formula))
         renderer = LiveRenderer(engine: engine, camera: camera)
-        pilot = Autopilot(camera: camera, renderer: renderer)
-        pilot.onArrival = { [weak self] period, log2Size in self?.announceMinibrot(period: period, log2Size: log2Size) }
+        autopilot = Autopilot(camera: camera, renderer: renderer)
+        autopilot.onArrival = { [weak self] period, log2Size in self?.announceMinibrot(period: period, log2Size: log2Size) }
         renderer.formula = formula
-        iter.blaLog2Eps = quality.blaLog2Eps
-        renderer.iter = iter
+        iteration.blaLog2Eps = quality.blaLog2Eps
+        renderer.iteration = iteration
         renderer.color = color
         renderer.samplesPerPixel = quality.samples
         renderer.onStatus = { [weak self] status in MainActor.assumeIsolated { self?.status = status } }
         renderer.onRecordingInterrupted = { [weak self] in
             MainActor.assumeIsolated { self?.stopRecording(note: "Recording stopped: the window changed size") }
         }
-        renderer.onIterationProposal = { [weak self] limit in MainActor.assumeIsolated { self?.iter.maxIter = limit } }
+        renderer.onIterationProposal = { [weak self] limit in MainActor.assumeIsolated { self?.iteration.maxIter = limit } }
         engine.references.onUpdate = { [weak self] in
             MainActor.assumeIsolated { self?.renderer.invalidate() }
         }
         renderer.onFrame = { [weak self] dt in MainActor.assumeIsolated { self?.tick(dt) } }
-        export.announce = { [weak self] message in self?.show(message, duration: 3) }
+        export.announce = { [weak self] message in self?.announce(message, duration: 3) }
         renderer.onProbe = { [weak self] probe in
             MainActor.assumeIsolated {
-                guard let self, self.autopilot else { return }
-                self.pilot.steer(with: probe, formula: self.formula)
+                guard let self, self.autopilotEngaged else { return }
+                self.autopilot.steer(with: probe, formula: self.formula)
             }
         }
         GPU.shared.prewarm()
@@ -151,6 +153,7 @@ final class AppModel {
 
     // MARK: Persistence
 
+    /// What the next launch restores: the view, colours, quality and iteration mode.
     private struct Session: Codable {
         var place: Location
         var color: ColorSettings
@@ -164,8 +167,8 @@ final class AppModel {
 
     func saveSession() {
         let place = Location(id: "session", name: "Last view", formula: formula, view: camera.view,
-                             palette: color.palette, maxIter: iter.maxIter)
-        let session = Session(place: place, color: color, quality: quality.rawValue, autoIterations: iter.autoIterations)
+                             palette: color.palette, maxIter: iteration.maxIter)
+        let session = Session(place: place, color: color, quality: quality.rawValue, autoIterations: iteration.autoIterations)
         guard let data = try? JSONEncoder().encode(session), data != lastSavedSession else { return }
         lastSavedSession = data
         UserDefaults.standard.set(data, forKey: AppModel.sessionKey)
@@ -178,8 +181,8 @@ final class AppModel {
         formula = session.place.formula
         color = session.color
         quality = Quality(rawValue: session.quality) ?? quality
-        iter.autoIterations = session.autoIterations
-        if let limit = session.place.maxIter { iter.maxIter = limit }
+        iteration.autoIterations = session.autoIterations
+        if let limit = session.place.maxIter { iteration.maxIter = limit }
         camera.jump(to: view)
         lastSavedSession = data
     }
@@ -190,49 +193,49 @@ final class AppModel {
         bookmarks = saved
     }
 
-    private func storeBookmarks() {
+    private func saveBookmarks() {
         if let data = try? JSONEncoder().encode(bookmarks) { UserDefaults.standard.set(data, forKey: AppModel.bookmarksKey) }
     }
 
     func addBookmark() {
         let view = camera.view
-        let place = Location(id: "bm-" + UUID().uuidString, name: "\(formula.displayName) · " + ScaleFact.magnification(view.zoomLog10),
-                             formula: formula, view: view, palette: color.palette, maxIter: iter.maxIter)
+        let place = Location(id: "bm-" + UUID().uuidString, name: "\(formula.displayName) · " + Magnification.text(view.zoomLog10),
+                             formula: formula, view: view, palette: color.palette, maxIter: iteration.maxIter)
         bookmarks.insert(place, at: 0)
-        storeBookmarks()
-        show("Saved to Your Places")
+        saveBookmarks()
+        announce("Saved to Your Places")
     }
 
     func removeBookmark(_ place: Location) {
         bookmarks.removeAll { $0.id == place.id }
-        storeBookmarks()
+        saveBookmarks()
     }
 
     // MARK: Navigation
 
     /// Ends the tour, and an autopilot that is flying somewhere, when the user takes over.
     func userInteracted() {
-        if autopilot && camera.isFlying { autopilot = false }
+        if autopilotEngaged && camera.isFlying { autopilotEngaged = false }
         if touring { stopTour() }
     }
 
     func goHome() {
-        autopilot = false
+        autopilotEngaged = false
         camera.fly(to: Viewport.home(for: formula), duration: 1.4)
     }
 
-    func fly(to location: Location, announce: Bool = true) {
-        autopilot = false
+    func fly(to location: Location, quietly: Bool = false) {
+        autopilotEngaged = false
         if location.formula != formula {
             formula = location.formula
             camera.jump(to: Viewport.home(for: formula))
         }
         if let palette = location.palette { setPalette(palette) }
-        if let limit = location.maxIter { iter.maxIter = max(iter.maxIter, limit) }
+        if let limit = location.maxIter { iteration.maxIter = max(iteration.maxIter, limit) }
         guard let view = location.viewport else { return }
         renderer.snapColors = true
         camera.fly(to: view)
-        if announce { show("\(location.name) · " + ScaleFact.magnification(location.zoom)) }
+        if !quietly { announce("\(location.name) · " + Magnification.text(location.zoom)) }
     }
 
     /// Zooms about the centre of the view (menu and keyboard).
@@ -255,28 +258,20 @@ final class AppModel {
 
     /// Switches between the parameter plane and the Julia set of the view centre.
     func toggleJulia() {
-        var toggled = formula
-        toggled.julia.toggle()
-        if toggled.julia {
-            let c = camera.view.center
-            toggled.juliaRe = c.re.doubleValue
-            toggled.juliaIm = c.im.doubleValue
-        }
+        let c = camera.view.center
+        let toggled = formula.julia ? formula.parameterPlane : formula.juliaSet(re: c.re.doubleValue, im: c.im.doubleValue)
         openJulia(toggled)
-        show(toggled.julia ? "Julia set for c = \(juliaText(toggled))" : "Mandelbrot set")
+        announce(toggled.julia ? "Julia set for c = \(juliaText(toggled))" : "Mandelbrot set")
     }
 
     /// Opens the Julia set of the parameter at drawable pixel `pixel`.
     func pickJulia(atPixel pixel: SIMD2<Double>) {
         let size = renderer.drawableSize
         let c = camera.view.point(atPixel: pixel, width: size.x, height: size.y, flipY: formula.family.flipY)
-        var julia = formula
-        julia.julia = true
-        julia.juliaRe = c.re.doubleValue
-        julia.juliaIm = c.im.doubleValue
+        let julia = formula.juliaSet(re: c.re.doubleValue, im: c.im.doubleValue)
         juliaHover = nil
         openJulia(julia)
-        show("Julia set for c = \(juliaText(julia))")
+        announce("Julia set for c = \(juliaText(julia))")
     }
 
     private func openJulia(_ julia: Formula) {
@@ -292,7 +287,7 @@ final class AppModel {
     /// Records the view once the camera has rested for a moment after moving.
     private func recordHistory() {
         let now = CACurrentMediaTime()
-        if camera.isAnimating || touring || autopilot {
+        if camera.isAnimating || touring || autopilotEngaged {
             restSince = now
             return
         }
@@ -316,7 +311,7 @@ final class AppModel {
     private func stepHistory(_ step: Int) {
         let index = historyIndex + step
         guard index >= 0, index < history.count, let view = history[index].viewport else {
-            show(step < 0 ? "Start of history" : "End of history")
+            announce(step < 0 ? "Start of history" : "End of history")
             return
         }
         historyIndex = index
@@ -369,7 +364,7 @@ final class AppModel {
         guard let view = place.viewport else { return false }
         renderer.snapColors = true
         camera.fly(to: view)
-        show("Flying to " + ScaleFact.magnification(zoomLog10))
+        announce("Flying to " + Magnification.text(zoomLog10))
         return true
     }
 
@@ -377,15 +372,15 @@ final class AppModel {
 
     /// Locates the lowest-period minibrot in view (quadratic Mandelbrot only) and flies to it.
     func findMinibrot() {
-        guard formula.family == .mandelbrot, formula.effectivePower == 2, !formula.julia else {
-            show("Mini-Mandelbrot search works in the Mandelbrot set")
+        guard formula.supportsMinibrotSearch else {
+            announce("Mini-Mandelbrot search works in the Mandelbrot set")
             return
         }
         guard !searchingMinibrot else { return }
         searchingMinibrot = true
-        autopilot = false
+        autopilotEngaged = false
         stopTour()
-        show("Searching for a mini-Mandelbrot…")
+        announce("Searching for a mini-Mandelbrot…")
         let view = camera.view
         Task.detached(priority: .userInitiated) { [weak self] in
             let found = AppModel.locateMinibrot(in: view)
@@ -393,7 +388,7 @@ final class AppModel {
                 guard let self else { return }
                 searchingMinibrot = false
                 guard let found else {
-                    show("No mini-Mandelbrot found here — try zooming closer to the edge")
+                    announce("No mini-Mandelbrot found here — try zooming closer to the edge")
                     return
                 }
                 renderer.snapColors = true
@@ -405,31 +400,29 @@ final class AppModel {
 
     /// The minibrot whose nucleus lies in or near `view`, if any: a view framing it, its period and log2 size.
     nonisolated private static func locateMinibrot(in view: Viewport) -> (view: Viewport, period: Int, log2Size: Double)? {
-        let period = Minibrot.period(center: view.center, log2Radius: view.log2Radius, maxPeriod: 2_000_000)
-        guard period > 0 else { return nil }
-        let precision = max(view.center.precision, Int(-view.log2Radius) * 2 + 160)
-        guard let nucleus = Minibrot.nucleus(near: view.center, period: period, precision: precision) else { return nil }
-        let (log2Size, _, cardioid) = Minibrot.size(nucleus: nucleus, period: period)
-        guard cardioid, log2Size.isFinite, log2Size < view.log2Radius,
-              nucleus.minus(view.center).log2Abs < view.log2Radius + 2 else { return nil }
-        return (Viewport(center: nucleus, log2Radius: log2Size + log2(2.6), rotation: view.rotation), period, log2Size)
+        guard let found = Minibrot.locate(near: view.center, searchLog2Radius: view.log2Radius,
+                                          viewLog2Radius: view.log2Radius, maxPeriod: 2_000_000),
+              found.cardioid, found.log2Size.isFinite, found.log2Size < view.log2Radius,
+              found.nucleus.minus(view.center).log2Abs < view.log2Radius + 2 else { return nil }
+        let framing = Viewport(center: found.nucleus, log2Radius: found.log2Size + log2(2.6), rotation: view.rotation)
+        return (framing, found.period, found.log2Size)
     }
 
     func announceMinibrot(period: Int, log2Size: Double) {
-        show("Mini-Mandelbrot of period \(period.formatted()) · " + ScaleFact.magnification((1 - log2Size) * log10(2.0)),
-             duration: 2.5)
+        announce("Mini-Mandelbrot of period \(period.formatted()) · "
+                 + Magnification.text(Viewport.zoomLog10(log2Radius: log2Size)), duration: 2.5)
     }
 
     /// Shows the orbit of the point at drawable pixel `pixel` (`scale`: pixels per point).
     func showOrbit(atPixel pixel: SIMD2<Double>, scale: Double) {
         orbitHover = OrbitHover(formula: formula, view: camera.view, cameraVersion: camera.version, pixel: pixel,
-                                drawable: renderer.drawableSize, scale: scale)
+                                drawableSize: renderer.drawableSize, scale: scale)
     }
 
     /// Speeds the autopilot up or down (keys , and .).
     func scaleAutopilotSpeed(_ factor: Double) {
-        pilot.speed = min(8, max(0.25, pilot.speed * factor))
-        show(String(format: "Autopilot speed %.1f×", pilot.speed))
+        autopilot.speed = min(8, max(0.25, autopilot.speed * factor))
+        announce(String(format: "Autopilot speed %.1f×", autopilot.speed))
     }
 
     // MARK: Colour and iterations
@@ -445,19 +438,19 @@ final class AppModel {
 
     func cyclePalette(_ step: Int) {
         setPalette(color.palette + step)
-        show(Palette.all[color.palette].name)
+        announce(Palette.all[color.palette].name)
     }
 
     func toggleLighting() {
         color.lightStrength = color.lightStrength > 0 ? 0 : 0.75
-        show(color.lightStrength > 0 ? "Lighting on" : "Lighting off")
+        announce(color.lightStrength > 0 ? "Lighting on" : "Lighting off")
     }
 
     /// Scales the iteration limit by hand, which turns automatic iterations off.
     func scaleIterations(_ factor: Double) {
-        iter.autoIterations = false
-        iter.maxIter = max(64, min(IterationTuner.ceiling, Int(Double(iter.maxIter) * factor)))
-        show("Iterations \(iter.maxIter.formatted())")
+        iteration.autoIterations = false
+        iteration.maxIter = max(64, min(IterationTuner.highestLimit, Int(Double(iteration.maxIter) * factor)))
+        announce("Iterations \(iteration.maxIter.formatted())")
     }
 
     // MARK: Export, recording and the pasteboard
@@ -475,11 +468,11 @@ final class AppModel {
     func startRecording(to file: URL? = nil) {
         let url = file ?? export.videoFolder.appendingPathComponent(ExportController.defaultName("Spectrum Recording", "mp4"))
         do {
-            renderer.recorder = try LiveRecorder(url: url, drawable: renderer.drawableSize)
+            renderer.recorder = try LiveRecorder(url: url, drawableSize: renderer.drawableSize)
             recordingSince = Date()
-            show("Recording · ⌘R to stop")
+            announce("Recording · ⌘R to stop")
         } catch {
-            show("Recording failed: \(error.localizedDescription)")
+            announce("Recording failed: \(error.localizedDescription)")
         }
     }
 
@@ -494,7 +487,7 @@ final class AppModel {
         recorder.finish { written in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    self.show(note ?? (written ? "Saved \(recorder.url.lastPathComponent)" : "Recording failed"), duration: 3)
+                    self.announce(note ?? (written ? "Saved \(recorder.url.lastPathComponent)" : "Recording failed"), duration: 3)
                     then?()
                 }
             }
@@ -506,17 +499,17 @@ final class AppModel {
         guard let image = renderer.captureCanvas() else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.writeObjects([NSImage(cgImage: image, size: .zero)])
-        show("Image copied")
+        announce("Image copied")
     }
 
     func copyCoordinates() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(coordinatesText, forType: .string)
-        show("Coordinates copied")
+        announce("Coordinates copied")
     }
 
     /// Shows a short notice at the top of the window.
-    func show(_ message: String, duration: Double = 1.6) {
+    func announce(_ message: String, duration: Double = 1.6) {
         toast = message
         toastTask?.cancel()
         toastTask = Task { [weak self] in
@@ -544,18 +537,18 @@ final class AppModel {
         if cycleColors {
             color.offset = (color.offset + dt * AppModel.colorCycleSpeed).truncatingRemainder(dividingBy: 1)
         }
-        if autopilot && !pilot.step(dt: dt, flipY: formula.family.flipY) { autopilot = false }
+        if autopilotEngaged && !autopilot.step(dt: dt, flipY: formula.family.flipY) { autopilotEngaged = false }
         if let orbit = orbitHover, orbit.cameraVersion != camera.version { showOrbit(atPixel: orbit.pixel, scale: orbit.scale) }
     }
 
     private func formulaChanged(from old: Formula) {
         renderer.formula = formula
         // targets (and a minibrot being approached) belong to the old set
-        if formula != old { pilot.reset() }
+        if formula != old { autopilot.reset() }
         if formula.family != old.family || formula.effectivePower != old.effectivePower || formula.julia != old.julia {
             engine.references.reset()
-            iter.maxIter = IterationSettings().maxIter
-            iter.blaLog2Eps = quality.blaLog2Eps
+            iteration.maxIter = IterationSettings().maxIter
+            iteration.blaLog2Eps = quality.blaLog2Eps
         }
     }
 }

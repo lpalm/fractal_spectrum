@@ -5,8 +5,9 @@ import ImageIO
 import UniformTypeIdentifiers
 import CFractal
 
-/// Turns scenes into G-buffers (per-sample iteration results) and G-buffers into colours; shared by
-/// the interactive view and exports.
+/// Turns scenes into G-buffers (per-sample iteration results) and G-buffers into colours. The interactive
+/// view, exports, Julia previews and thumbnails each own one, so their reference orbits and command
+/// queues stay independent.
 public final class Engine: @unchecked Sendable {
     public let gpu = GPU.shared
     /// Each engine has its own queue so offline renders never wait behind interactive passes or vice versa.
@@ -22,13 +23,16 @@ public final class Engine: @unchecked Sendable {
     private let placeholderTexture: MTLTexture
     private var lastStatsSlot: UInt32 = 0
     /// Passes in flight at once never come near this many.
-    private static let statsSlots: UInt32 = 256
+    private static let statsSlotCount: UInt32 = 256
+    /// Bytes per G-buffer sample (the kernels' GSample: escape iteration, smooth fraction, distance
+    /// estimate, normal).
+    public static let gBufferSampleStride = 16
 
     public init() {
         let device = gpu.device
         queue = device.makeCommandQueue()!
         palettes = PaletteBank(device: device)
-        statsBuffer = device.makeBuffer(length: Int(Engine.statsSlots) * MemoryLayout<FSStats>.stride,
+        statsBuffer = device.makeBuffer(length: Int(Engine.statsSlotCount) * MemoryLayout<FSStats>.stride,
                                         options: .storageModeShared)!
         assert(MemoryLayout<FSStats>.stride == 32)
         colorOriginBuffer = device.makeBuffer(length: 16, options: .storageModeShared)!
@@ -42,7 +46,7 @@ public final class Engine: @unchecked Sendable {
 
     /// A statistics slot for the next pass.
     public func nextStatsSlot() -> UInt32 {
-        lastStatsSlot = (lastStatsSlot + 1) % Engine.statsSlots
+        lastStatsSlot = (lastStatsSlot + 1) % Engine.statsSlotCount
         return lastStatsSlot
     }
 
@@ -76,7 +80,7 @@ public final class Engine: @unchecked Sendable {
         public var perturbed: Bool
         public var deep: Bool
         public var effectiveMaxIter: Int
-        public var usedBLA: Bool { blaTable != nil }
+        public var usesBLA: Bool { blaTable != nil }
     }
 
     /// Prepares a pass; returns nil while a needed reference orbit is still being computed (unless
@@ -90,11 +94,11 @@ public final class Engine: @unchecked Sendable {
                          interior: Bool = true) -> Plan? {
         let formula = scene.formula, view = scene.view
         let log2Step = view.log2Step(width: grid.width, height: grid.height)
-        let maxIter = max(scene.iter.maxIter, 16)
+        let maxIter = max(scene.iteration.maxIter, 16)
         var params = iterationParams(scene: scene, grid: grid, log2Step: log2Step, maxIter: maxIter, statsSlot: statsSlot)
-        var key = GPU.PipelineKey(name: "iterate_direct", formula: formula.family.formulaID,
+        var key = GPU.PipelineKey(name: "iterate_direct", family: formula.family.formulaID,
                                   power: Int32(formula.effectivePower), julia: formula.julia,
-                                  derivative: scene.iter.derivative)
+                                  derivative: scene.iteration.derivative)
 
         // Floats resolve samples this far apart around the view centre; deeper views iterate each
         // sample's difference from a reference orbit instead.
@@ -106,20 +110,20 @@ public final class Engine: @unchecked Sendable {
         let minSide = Double(min(grid.width, grid.height))
         guard let reference = references.reference(formula: formula, view: view, minSide: minSide,
                                                    length: maxIter + 1, focus: focus, blocking: blocking) else { return nil }
-        let orbit = reference.snapshot
-        guard orbit.count >= 2 else { return nil }
+        let snapshot = reference.snapshot
+        guard snapshot.count >= 2 else { return nil }
         var critical: ReferenceOrbit?
         if formula.julia {
-            guard let c = references.criticalOrbit(formula: formula, precision: view.requiredPrecision(minSide: minSide),
-                                                   length: maxIter + 1, blocking: blocking),
-                  c.snapshot.count >= 2 else { return nil }
-            critical = c
+            guard let orbit = references.criticalOrbit(formula: formula, precision: view.requiredPrecision(minSide: minSide),
+                                                       length: maxIter + 1, blocking: blocking),
+                  orbit.snapshot.count >= 2 else { return nil }
+            critical = orbit
         }
         let offset = view.center.minus(reference.center)
         (params.offsetM, params.offsetE) = offset.shared
-        let effectiveMaxIter = orbit.escaped ? maxIter : min(maxIter, orbit.count - 1)
+        let effectiveMaxIter = snapshot.escaped ? maxIter : min(maxIter, snapshot.count - 1)
         params.maxIter = UInt32(effectiveMaxIter)
-        params.refLen = UInt32(orbit.count)
+        params.refLen = UInt32(snapshot.count)
 
         // The largest |dc| over the grid, log2(|offset| + half diagonal), decides how far each
         // approximation may reach; Julia sets have no dc.
@@ -128,37 +132,33 @@ public final class Engine: @unchecked Sendable {
         let log2C = formula.julia ? -1e30
             : log2Offset.isFinite ? max(log2Offset, log2HalfDiagonal) + log2(1 + exp2(-abs(log2Offset - log2HalfDiagonal)))
             : log2HalfDiagonal
-        let log2Eps = scene.iter.blaLog2Eps
+        let log2Eps = scene.iteration.blaLog2Eps
         /// The orbit's table, rebuilt (with twice the reach needed) unless the current one reaches
         /// far enough without being more than 16 times too cautious.
         func blaTable(of orbit: ReferenceOrbit, _ snapshot: ReferenceOrbit.Snapshot, formula: Formula) -> BLATable? {
-            guard scene.iter.useBLA else { return nil }
-            if let t = orbit.bla, t.orbitLength == snapshot.count, t.log2Eps == log2Eps, log2C <= t.log2C,
+            guard scene.iteration.useBLA else { return nil }
+            if let t = orbit.blaTable, t.orbitLength == snapshot.count, t.log2Eps == log2Eps, log2C <= t.log2C,
                log2C >= t.log2C - 4 { return t }
             let t = BLATable(encodingInto: encoder, snapshot: snapshot, formula: formula, log2C: log2C + 1,
-                             log2Eps: log2Eps, reuse: exclusive ? orbit.bla : nil)
-            orbit.bla = t
+                             log2Eps: log2Eps, reuse: exclusive ? orbit.blaTable : nil)
+            orbit.blaTable = t
             return t
         }
-        let table = blaTable(of: reference, orbit, formula: formula)
+        let table = blaTable(of: reference, snapshot, formula: formula)
         if let table {
             params.blaLevels = UInt32(table.offsets.count)
             copy(table.offsets, into: &params.blaOffset)
             copy(table.counts, into: &params.blaCount)
         }
-        var criticalOrbit: ReferenceOrbit.Snapshot?
+        let criticalSnapshot = critical?.snapshot
         var criticalTable: BLATable?
-        if let critical {
-            var parameterPlane = formula
-            parameterPlane.julia = false
-            let snapshot = critical.snapshot
-            criticalOrbit = snapshot
-            criticalTable = blaTable(of: critical, snapshot, formula: parameterPlane)
-            params.refLen2 = UInt32(snapshot.count)
+        if let critical, let criticalSnapshot {
+            criticalTable = blaTable(of: critical, criticalSnapshot, formula: formula.parameterPlane)
+            params.criticalRefLen = UInt32(criticalSnapshot.count)
             if let t = criticalTable {
-                params.blaLevels2 = UInt32(t.offsets.count)
-                copy(t.offsets, into: &params.blaOffset2)
-                copy(t.counts, into: &params.blaCount2)
+                params.criticalBLALevels = UInt32(t.offsets.count)
+                copy(t.offsets, into: &params.criticalBLAOffset)
+                copy(t.counts, into: &params.criticalBLACount)
             }
         }
         // Views this deep may need extended-range deltas (the kernel's DEEP variant).
@@ -167,8 +167,8 @@ public final class Engine: @unchecked Sendable {
         key.useBLA = table != nil
         key.deep = deep
         key.interior = interior
-        return Plan(params: params, pipeline: gpu.pipeline(key), reference: orbit, blaTable: table,
-                    criticalReference: criticalOrbit, criticalBLATable: criticalTable, perturbed: true, deep: deep,
+        return Plan(params: params, pipeline: gpu.pipeline(key), reference: snapshot, blaTable: table,
+                    criticalReference: criticalSnapshot, criticalBLATable: criticalTable, perturbed: true, deep: deep,
                     effectiveMaxIter: effectiveMaxIter)
     }
 
@@ -181,13 +181,13 @@ public final class Engine: @unchecked Sendable {
         let basis = scene.view.basis(flipY: formula.family.flipY)
         var params = FSIterParams()
         params.size = SIMD2(UInt32(grid.width), UInt32(grid.height))
-        params.bufStride = UInt32(grid.width)
+        params.bufferStride = UInt32(grid.width)
         params.stepX = SIMD2<Float>(basis.x * step.m)
         params.stepY = SIMD2<Float>(basis.y * step.m)
         params.stepE = Int32(step.e)
         params.jitter = grid.jitter
         params.juliaC = SIMD2(Float(formula.juliaRe), Float(formula.juliaIm))
-        params.bailout2 = Float(scene.iter.bailout * scene.iter.bailout)
+        params.bailout2 = Float(scene.iteration.bailout * scene.iteration.bailout)
         params.log2Bailout2 = log2(params.bailout2)
         params.invLog2Power = 1 / log2(Float(formula.effectivePower))
         params.log2Step = Float(log2Step)
@@ -204,8 +204,8 @@ public final class Engine: @unchecked Sendable {
         var params = plan.params
         params.origin = origin
         params.workSize = size
-        params.bufOrigin = bufferOrigin
-        params.bufStride = bufferStride
+        params.bufferOrigin = bufferOrigin
+        params.bufferStride = bufferStride
         encoder.setBuffer(gBuffer, offset: 0, index: 0)
         encoder.setBytes(&params, length: MemoryLayout<FSIterParams>.stride, index: 1)
         if let reference = plan.reference {
@@ -316,7 +316,7 @@ public final class Engine: @unchecked Sendable {
                              outputSize: SIMD2<UInt32>) -> FSColorParams {
         var params = FSColorParams()
         params.outSize = outputSize
-        params.gSize = gBufferSize
+        params.gBufferSize = gBufferSize
         params.density = Float(color.density)
         params.offset = Float(color.offset)
         params.mapping = Int32(color.mapping)
@@ -345,7 +345,7 @@ public final class Engine: @unchecked Sendable {
         params.accumulate = accumulate ? 1 : 0
         if let fallback {
             params.useFallback = 1
-            params.fbSize = fallback.previewSize
+            params.fallbackSize = fallback.previewSize
             params.tileGrid = fallback.grid
             params.tileSize = fallback.tileSize
         }
@@ -375,7 +375,7 @@ public final class Engine: @unchecked Sendable {
     public func encodeUpsample(_ encoder: MTLComputeCommandEncoder, from image: MTLTexture, size: SIMD2<UInt32>,
                                into accumulator: MTLTexture, outputSize: SIMD2<UInt32>) {
         var params = FSColorParams()
-        params.gSize = size
+        params.gBufferSize = size   // the source image's size
         params.outSize = outputSize
         encoder.setTexture(image, index: 0)
         encoder.setTexture(accumulator, index: 1)
@@ -429,9 +429,9 @@ public final class Engine: @unchecked Sendable {
         gpu.dispatch2D(encoder, gpu.pipeline("present"), width: Int(params.size.x), height: Int(params.size.y))
     }
 
-    /// A G-buffer for `samples` samples (16 bytes each, GPU only).
+    /// A G-buffer for `samples` samples (GPU only).
     public func makeGBuffer(samples: Int) -> MTLBuffer {
-        gpu.device.makeBuffer(length: max(samples, 1) * 16, options: .storageModePrivate)!
+        gpu.device.makeBuffer(length: max(samples, 1) * Engine.gBufferSampleStride, options: .storageModePrivate)!
     }
 
     /// An image that sums colour samples (alpha counts them).
@@ -495,35 +495,49 @@ extension Engine {
         let scale = max(1, max(width, height) / 512)
         let gw = max(width / scale, 16), gh = max(height / scale, 16)
         let gBuffer = makeGBuffer(samples: gw * gh)
+        // enough rounds for the limit to double from its lowest to its highest
         for _ in 0..<24 {
-            guard let commandBuffer = queue.makeCommandBuffer(),
-                  let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
-            let slot = nextStatsSlot()
-            guard let plan = makePlan(scene: scene, grid: Grid(width: gw, height: gh), encoder: encoder, blocking: true,
-                                      statsSlot: slot) else {
-                encoder.endEncoding()
-                commandBuffer.commit()
-                return
-            }
-            encodeStatsReset(encoder, slot: slot)
-            encodeIterate(encoder, plan: plan, into: gBuffer, origin: .zero, size: SIMD2(UInt32(gw), UInt32(gh)),
-                          bufferOrigin: .zero, bufferStride: UInt32(gw))
-            if updateColors { encodeColorOrigin(encoder, slot: slot, zoomed: nil) }
-            encoder.endEncoding()
-            commandBuffer.commit()
-            commandBuffer.waitUntilCompleted()
-            guard scene.iter.autoIterations else { return }
-            let stats = readStats(slot)
-            let gpuMs = (commandBuffer.gpuEndTime - commandBuffer.gpuStartTime) * 1000
-            let maxIter = scene.iter.maxIter
-            let next = IterationTuner.adjustOffline(maxIter: maxIter, stats: stats, samples: gw * gh, gpuMs: gpuMs)
+            guard let pass = runPass(scene: scene, width: gw, height: gh, into: gBuffer,
+                                     encodeAfter: updateColors ? { self.encodeColorOrigin($0, slot: $1, zoomed: nil) } : nil)
+            else { return }
+            guard scene.iteration.autoIterations else { return }
+            let stats = readStats(pass.slot)
+            let maxIter = scene.iteration.maxIter
+            let next = IterationTuner.adjustOffline(maxIter: maxIter, stats: stats, samples: gw * gh, gpuMs: pass.gpuMs)
             if Engine.traceTuning {
-                print("tune maxIter \(maxIter): esc \(stats.escaped) late \(stats.lateEscaped) unresolved \(stats.unresolved) interior \(stats.interior) hi \(stats.maxIter) of \(gw * gh) \(String(format: "%.1f", gpuMs)) ms -> \(next)")
+                print("tune maxIter \(maxIter): esc \(stats.escaped) late \(stats.lateEscaped) unresolved \(stats.unresolved) interior \(stats.interior) hi \(stats.highestEscape) of \(gw * gh) \(String(format: "%.1f", pass.gpuMs)) ms -> \(next)")
             }
-            scene.iter.maxIter = next
+            scene.iteration.maxIter = next
             // a lower limit still shows every escape, so only a raised one needs another look
             if next <= maxIter { return }
         }
+    }
+
+    /// Iterates a whole `width` x `height` grid in a command buffer of its own and commits it, waiting
+    /// for it unless `wait` is false. `encodeAfter` adds work behind the iteration (it gets the stats
+    /// slot). Nil when no plan could be made.
+    public func runPass(scene: FractalScene, width: Int, height: Int, into gBuffer: MTLBuffer, interior: Bool = true,
+                        resetStats: Bool = true, wait: Bool = true,
+                        encodeAfter: ((MTLComputeCommandEncoder, UInt32) -> Void)? = nil)
+        -> (plan: Plan, slot: UInt32, gpuMs: Double)? {
+        guard let commandBuffer = queue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+        let slot = nextStatsSlot()
+        guard let plan = makePlan(scene: scene, grid: Grid(width: width, height: height), encoder: encoder,
+                                  blocking: true, statsSlot: slot, interior: interior) else {
+            encoder.endEncoding()
+            commandBuffer.commit()
+            return nil
+        }
+        if resetStats { encodeStatsReset(encoder, slot: slot) }
+        encodeIterate(encoder, plan: plan, into: gBuffer, origin: .zero, size: SIMD2(UInt32(width), UInt32(height)),
+                      bufferOrigin: .zero, bufferStride: UInt32(width))
+        encodeAfter?(encoder, slot)
+        encoder.endEncoding()
+        commandBuffer.commit()
+        guard wait else { return (plan, slot, 0) }
+        commandBuffer.waitUntilCompleted()
+        return (plan, slot, (commandBuffer.gpuEndTime - commandBuffer.gpuStartTime) * 1000)
     }
 
     /// Renders a still image tile by tile with `options.samples` anti-aliasing samples per pixel.
@@ -534,23 +548,23 @@ extension Engine {
         let (width, height) = (options.width, options.height)
         colorOrigin = options.colorOrigin
         calibrate(scene: &scene, width: width, height: height, updateColors: options.colorOrigin == nil)
-        let tile = min(Engine.stillTileSize, max(width, height))
-        let gBuffer = makeGBuffer(samples: tile * tile)
-        let accumulator = makeAccumulator(width: tile, height: tile)
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: tile, height: tile,
-                                                                  mipmapped: false)
+        let tileSide = min(Engine.stillTileSize, max(width, height))
+        let gBuffer = makeGBuffer(samples: tileSide * tileSide)
+        let accumulator = makeAccumulator(width: tileSide, height: tileSide)
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: tileSide,
+                                                                  height: tileSide, mipmapped: false)
         descriptor.usage = [.shaderWrite, .shaderRead]
         descriptor.storageMode = .shared
         let tileImage = gpu.device.makeTexture(descriptor: descriptor)!
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
-        let tilesX = (width + tile - 1) / tile, tilesY = (height + tile - 1) / tile
+        let tilesX = (width + tileSide - 1) / tileSide, tilesY = (height + tileSide - 1) / tileSide
         let passes = Double(tilesX * tilesY * options.samples)
         var finishedPasses = 0.0
         let paced = PacedEncoder(queue: queue)
         for ty in 0..<tilesY {
             for tx in 0..<tilesX {
-                let x0 = tx * tile, y0 = ty * tile
-                let w = min(tile, width - x0), h = min(tile, height - y0)
+                let x0 = tx * tileSide, y0 = ty * tileSide
+                let w = min(tileSide, width - x0), h = min(tileSide, height - y0)
                 let size = SIMD2(UInt32(w), UInt32(h))
                 for sample in 0..<options.samples {
                     let slot = nextStatsSlot()
@@ -597,31 +611,34 @@ extension Engine {
 
 /// Automatic iteration limit from escape statistics.
 public enum IterationTuner {
-    public static let floor = 1000
-    public static let ceiling = 100_000_000
+    /// Range the automatic limit stays within.
+    public static let lowestLimit = 1000
+    public static let highestLimit = 100_000_000
     /// Offline renders raise the limit only while a sample costs less than this many GPU µs on
     /// average (about four times the interactive view's budget).
     public static let offlineMicrosPerSample = 1.6
 
     /// Cost of a pass after raising the limit from `maxIter` to `next`: unresolved samples run to the
     /// new limit, the others cost the same.
-    public static func grownCost(_ cost: Double, stats s: FSStats, samples: Int, maxIter: Int, next: Int) -> Double {
+    public static func grownCost(_ cost: Double, stats: FSStats, samples: Int, maxIter: Int, next: Int) -> Double {
         let n = Double(max(samples, 1))
-        let mean = max(Double(s.iterations) / n, 1)
-        return cost * (mean + Double(s.unresolved) / n * Double(next - maxIter)) / mean
+        let mean = max(Double(stats.iterations) / n, 1)
+        return cost * (mean + Double(stats.unresolved) / n * Double(next - maxIter)) / mean
     }
 
     /// Doubles the limit while a noticeable share of samples is still unresolved (hit the limit
     /// without escaping or showing an attracting cycle) and escapes still happen near the limit;
     /// lowers it when every escape happens far below the limit.
-    public static func adjust(maxIter: Int, stats s: FSStats, samples: Int) -> Int {
+    public static func adjust(maxIter: Int, stats: FSStats, samples: Int) -> Int {
         let n = Double(max(samples, 1))
-        let unresolved = Double(s.unresolved) / n
-        if s.escaped == 0 { return unresolved > 0.01 ? min(maxIter * 4, ceiling) : maxIter }
-        let late = Double(s.lateEscaped) / n
-        if unresolved > 0.01 && late > 0.01 { return min(maxIter * 2, ceiling) }
-        let hi = Int(s.maxIter)
-        if hi < maxIter / 8 && unresolved < 0.0005 && maxIter > floor { return max(floor, hi * 3) }
+        let unresolved = Double(stats.unresolved) / n
+        if stats.escaped == 0 { return unresolved > 0.01 ? min(maxIter * 4, highestLimit) : maxIter }
+        let late = Double(stats.lateEscaped) / n
+        if unresolved > 0.01 && late > 0.01 { return min(maxIter * 2, highestLimit) }
+        let highestEscape = Int(stats.highestEscape)
+        if highestEscape < maxIter / 8 && unresolved < 0.0005 && maxIter > lowestLimit {
+            return max(lowestLimit, highestEscape * 3)
+        }
         return maxIter
     }
 

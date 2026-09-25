@@ -92,14 +92,14 @@ final class ExportController {
     /// Receives the outcome of every export ("Saved …", "Cancelled", or the error), for a notice.
     @ObservationIgnored var announce: ((String) -> Void)?
     @ObservationIgnored private let cancelToken = CancelToken()
-    @ObservationIgnored private var started = Date()
+    @ObservationIgnored private var startDate = Date()
 
     func cancel() { cancelToken.cancelled = true }
 
     /// Remaining time of the running export, estimated from its progress so far.
-    var eta: String {
+    var remainingTimeText: String {
         guard running, progress > 0.02 else { return "" }
-        let elapsed = Date().timeIntervalSince(started)
+        let elapsed = Date().timeIntervalSince(startDate)
         let left = elapsed / progress * (1 - progress)
         if left < 60 { return String(format: "%.0f s left", left) }
         if left < 3600 { return String(format: "%.0f min left", left / 60) }
@@ -140,30 +140,30 @@ final class ExportController {
 
     /// A file in `folder` named after the current time ("Spectrum 2026-09-25 at 09.41.00.png"),
     /// numbered if that name is taken.
-    private static func newFile(in folder: URL, extension ext: String) -> URL {
-        let name = defaultName("Spectrum", ext)
+    private static func newFile(in folder: URL, extension fileExtension: String) -> URL {
+        let name = defaultName("Spectrum", fileExtension)
         var url = folder.appendingPathComponent(name)
         var number = 2
         while FileManager.default.fileExists(atPath: url.path) {
-            url = folder.appendingPathComponent((name as NSString).deletingPathExtension + " \(number).\(ext)")
+            url = folder.appendingPathComponent((name as NSString).deletingPathExtension + " \(number).\(fileExtension)")
             number += 1
         }
         return url
     }
 
     /// "Prefix 2026-09-25 at 09.41.00.ext", like the system's screenshots.
-    static func defaultName(_ prefix: String, _ ext: String) -> String {
+    static func defaultName(_ prefix: String, _ fileExtension: String) -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
-        return "\(prefix) \(formatter.string(from: Date())).\(ext)"
+        return "\(prefix) \(formatter.string(from: Date())).\(fileExtension)"
     }
 
     /// Renders the current view as an image into the image folder (or to `destination`).
     func exportImage(model: AppModel, to destination: URL? = nil) {
         let url = destination ?? ExportController.newFile(in: imageFolder, extension: "png")
-        var iter = model.iter
-        iter.maxIter = max(iter.maxIter, 1000)
-        let job = Exporter.ImageJob(scene: FractalScene(formula: model.formula, view: model.camera.view, iter: iter),
+        var iteration = model.iteration
+        iteration.maxIter = max(iteration.maxIter, 1000)
+        let job = Exporter.ImageJob(scene: FractalScene(formula: model.formula, view: model.camera.view, iteration: iteration),
                                     color: model.color, width: imageSize.width, height: imageSize.height,
                                     samples: imageSamples, colorOrigin: model.engine.colorOrigin)
         run("Rendering \(imageSize.width)×\(imageSize.height)", to: url) { [weak self] exporter, token in
@@ -213,7 +213,7 @@ final class ExportController {
         progress = 0
         preview = nil
         status = text
-        started = Date()
+        startDate = Date()
     }
 
     private func finish(url: URL?, message: String) {
@@ -388,7 +388,7 @@ struct ExportSheet: View {
                 HStack {
                     Text(export.status).font(.rounded(13, .semibold))
                     Spacer()
-                    Text(export.eta).font(.rounded(12)).foregroundStyle(.secondary).monospacedDigit()
+                    Text(export.remainingTimeText).font(.rounded(12)).foregroundStyle(.secondary).monospacedDigit()
                 }
                 if export.running {
                     ProgressView(value: export.progress)

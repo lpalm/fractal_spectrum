@@ -17,7 +17,7 @@ typedef unsigned int fs_uint;
 
 #define FS_MAX_BLA_LEVELS 32
 #define FS_ZERO_EXP (-(1 << 24))   // exponent used for exact zeros in extended-range values
-#define FS_INTERIOR 0xFFFFFFFFu
+#define FS_INTERIOR 0xFFFFFFFFu   // GSample.n of samples that never escaped (cycle or iteration limit): drawn as the set
 
 // Formula identifiers (function constant FORMULA).
 #define FS_FORMULA_MANDEL 0      // z^p + c
@@ -29,8 +29,8 @@ typedef unsigned int fs_uint;
 typedef struct {
     fs_uint2 size;          // full target size in samples
     fs_uint2 origin;        // tile origin in samples
-    fs_uint2 bufOrigin;     // sample stored at index 0 of the G-buffer
-    fs_uint bufStride;      // G-buffer row length
+    fs_uint2 bufferOrigin;  // sample stored at index 0 of the G-buffer
+    fs_uint bufferStride;   // G-buffer row length
     fs_uint pad0;
     fs_uint2 workSize;      // rectangle of samples processed by this dispatch
     fs_float2 offsetM;      // mantissa of (view center - reference start); direct kernel: view center
@@ -50,13 +50,13 @@ typedef struct {
     fs_uint statsSlot;
     fs_uint blaOffset[FS_MAX_BLA_LEVELS];
     fs_uint blaCount[FS_MAX_BLA_LEVELS];
-    // Julia sets: second reference (orbit of the critical point 0) that pixels rebase onto.
-    fs_uint refLen2;
-    fs_uint blaLevels2;
+    // Julia sets: the orbit of the critical point 0, which samples rebase onto, and its BLA table.
+    fs_uint criticalRefLen;
+    fs_uint criticalBLALevels;
     fs_uint pad2;
     fs_uint pad3;
-    fs_uint blaOffset2[FS_MAX_BLA_LEVELS];
-    fs_uint blaCount2[FS_MAX_BLA_LEVELS];
+    fs_uint criticalBLAOffset[FS_MAX_BLA_LEVELS];
+    fs_uint criticalBLACount[FS_MAX_BLA_LEVELS];
 } FSIterParams;
 
 // Reference orbit point in extended range: value = m * 2^e.
@@ -76,21 +76,23 @@ typedef struct {
     int pad1;
 } FSBLAEntry;
 
+// Parameters of one BLA build dispatch: level 0 from the reference orbit (bla_init), or a level merged
+// from pairs of entries of the level below (bla_merge).
 typedef struct {
     fs_uint count;          // entries to produce
-    fs_uint srcOffset;      // first source entry (merge) or first reference index (level 0)
-    fs_uint dstOffset;
-    fs_uint srcCount;
-    float log2Eps;
+    fs_uint srcOffset;      // first entry of the level below (bla_merge only)
+    fs_uint dstOffset;      // first entry written
+    float log2Eps;          // relative error tolerated
     float log2C;            // log2 of max |dc| over the image; very negative for Julia sets
     float pad0;
     float pad1;
+    float pad2;
 } FSBLABuildParams;
 
 // Escape statistics accumulated by the iteration kernels.
 typedef struct {
-    fs_uint minIter;        // lowest escaped iteration
-    fs_uint maxIter;        // highest escaped iteration
+    fs_uint lowestEscape;
+    fs_uint highestEscape;
     fs_uint escaped;
     fs_uint lateEscaped;    // escaped in the upper half of the iteration limit
     fs_uint unresolved;     // reached the limit without escaping or a detected cycle
@@ -102,8 +104,8 @@ typedef struct {
 // Parameters of the colouring kernel.
 typedef struct {
     fs_uint2 outSize;
-    fs_uint2 gSize;         // primary G-buffer size
-    fs_uint2 fbSize;        // logical size of the fallback colour image
+    fs_uint2 gBufferSize;   // primary G-buffer size (the source image's size in the upsample pass)
+    fs_uint2 fallbackSize;  // logical size of the fallback colour image
     fs_uint2 tileGrid;      // primary tiles per axis
     fs_uint tileSize;
     fs_uint useFallback;

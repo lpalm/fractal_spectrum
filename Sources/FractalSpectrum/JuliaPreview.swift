@@ -58,11 +58,8 @@ struct JuliaPreviewView: NSViewRepresentable {
     }
 
     func updateNSView(_ view: MTKView, context: Context) {
-        var julia = formula
-        julia.julia = true
-        julia.juliaRe = re
-        julia.juliaIm = im
-        context.coordinator.scene = FractalScene(formula: julia, view: Viewport.home(for: julia), iter: IterationSettings())
+        let julia = formula.juliaSet(re: re, im: im)
+        context.coordinator.scene = FractalScene(formula: julia, view: Viewport.home(for: julia), iteration: IterationSettings())
         context.coordinator.color = color
         view.needsDisplay = true
     }
@@ -71,7 +68,7 @@ struct JuliaPreviewView: NSViewRepresentable {
 /// Renders the preview synchronously into the view's drawable (a small frame takes about a millisecond).
 final class JuliaPreviewRenderer: NSObject, MTKViewDelegate {
     private let engine = Engine()
-    private var frames: FrameRenderer?
+    private var frameRenderer: FrameRenderer?
     var scene: FractalScene?
     var color = ColorSettings()
 
@@ -80,10 +77,10 @@ final class JuliaPreviewRenderer: NSObject, MTKViewDelegate {
     func draw(in view: MTKView) {
         let width = Int(view.drawableSize.width), height = Int(view.drawableSize.height)
         guard let scene, width > 0, height > 0, let drawable = view.currentDrawable else { return }
-        if frames?.width != width || frames?.height != height {
-            frames = FrameRenderer(engine: engine, width: width, height: height)
+        if frameRenderer?.width != width || frameRenderer?.height != height {
+            frameRenderer = FrameRenderer(engine: engine, width: width, height: height)
         }
-        frames?.render(scene: scene, color: color, samples: 2, into: drawable.texture, zoomed: nil)
+        frameRenderer?.render(scene: scene, color: color, samples: 2, into: drawable.texture, zoomed: nil)
         guard let commandBuffer = engine.queue.makeCommandBuffer() else { return }
         commandBuffer.present(drawable)
         commandBuffer.commit()

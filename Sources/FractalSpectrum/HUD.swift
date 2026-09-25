@@ -8,9 +8,9 @@ struct HUDBar: View {
     var body: some View {
         let status = model.status
         HStack(spacing: 16) {
-            readout("scope", status.map { ScaleFact.magnification($0.view.zoomLog10) } ?? "—", "magnification")
+            readout("scope", status.map { Magnification.text($0.view.zoomLog10) } ?? "—", "magnification")
             divider
-            readout("arrow.triangle.2.circlepath", (status?.maxIter ?? model.iter.maxIter).formatted(), "iterations")
+            readout("arrow.triangle.2.circlepath", (status?.maxIter ?? model.iteration.maxIter).formatted(), "iterations")
             divider
             // measured only while the view moves
             readout("speedometer", status.map { $0.fps > 0 ? "\(Int($0.fps.rounded()))" : "—" } ?? "—", "fps")
@@ -26,7 +26,7 @@ struct HUDBar: View {
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
-            if model.autopilot {
+            if model.autopilotEngaged {
                 divider
                 Label("Autopilot", systemImage: "airplane")
                     .font(.rounded(12, .semibold))
@@ -83,7 +83,7 @@ struct HUDBar: View {
 
     private func stageText(_ status: LiveRenderer.Status?) -> String {
         guard let status else { return "Starting" }
-        if let orbit = status.referenceProgress { return String(format: "Orbit %.0f%%", orbit * 100) }
+        if let referenceProgress = status.referenceProgress { return String(format: "Orbit %.0f%%", referenceProgress * 100) }
         return switch status.stage {
         case .preparing: status.stage.rawValue
         case .refining: String(format: "Refining %.0f%%", status.progress * 100)
@@ -117,8 +117,8 @@ struct TopControls: View {
     var body: some View {
         GlassEffectContainer(spacing: 8) {
             HStack(spacing: 8) {
-                control(model.autopilot ? "pause.fill" : "play.fill", model.autopilot ? "Stop autopilot (P)" : "Autopilot dive (P)") {
-                    model.autopilot.toggle()
+                control(model.autopilotEngaged ? "pause.fill" : "play.fill", model.autopilotEngaged ? "Stop autopilot (P)" : "Autopilot dive (P)") {
+                    model.autopilotEngaged.toggle()
                 }
                 control(model.touring ? "stop.fill" : "sparkles", model.touring ? "Stop tour (T)" : "Guided tour (T)") {
                     model.toggleTour()

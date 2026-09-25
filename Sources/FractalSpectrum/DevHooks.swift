@@ -6,11 +6,11 @@ import FractalKit
 @MainActor
 final class DevHooks {
     private let model: AppModel
-    private var token: NSObjectProtocol?
+    private var observer: NSObjectProtocol?
 
     init(model: AppModel) {
         self.model = model
-        token = DistributedNotificationCenter.default().addObserver(
+        observer = DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("com.lpalm.spectrum.command"), object: nil, queue: .main) { [weak self] notification in
             guard let command = notification.object as? String else { return }
             MainActor.assumeIsolated { self?.run(command) }
@@ -20,13 +20,13 @@ final class DevHooks {
     private func run(_ command: String) {
         let parts = command.split(separator: ":", maxSplits: 1).map(String.init)
         let verb = parts.first ?? ""
-        let arg = parts.count > 1 ? parts[1] : ""
+        let argument = parts.count > 1 ? parts[1] : ""
         switch verb {
-        case "snapshot": snapshot(to: arg, withUI: true)
-        case "canvas": snapshot(to: arg, withUI: false)
-        case "fly": if let location = Location.all.first(where: { $0.id == arg }) { model.fly(to: location) }
+        case "snapshot": snapshot(to: argument, withUI: true)
+        case "canvas": snapshot(to: argument, withUI: false)
+        case "fly": if let location = Location.all.first(where: { $0.id == argument }) { model.fly(to: location) }
         case "jump":
-            if let location = Location.all.first(where: { $0.id == arg }), let view = location.viewport {
+            if let location = Location.all.first(where: { $0.id == argument }), let view = location.viewport {
                 model.formula = location.formula
                 if let palette = location.palette { model.color.palette = palette }
                 model.renderer.snapColors = true
@@ -35,25 +35,25 @@ final class DevHooks {
         case "home": model.goHome()
         case "back": model.goBack()
         case "forward": model.goForward()
-        case "goto": model.goTo(text: arg.replacingOccurrences(of: "|", with: "\n"))
+        case "goto": model.goTo(text: argument.replacingOccurrences(of: "|", with: "\n"))
         case "minibrot": model.findMinibrot()
-        case "tour": if arg == "off" { model.stopTour() } else { model.startTour() }
-        case "zoom": model.zoomStep(Double(arg) ?? -1)
-        case "palette": model.setPalette(Int(arg) ?? 0)
-        case "family": if let family = FractalFamily(rawValue: arg) { model.selectFamily(family) }
-        case "ui": model.showUI = arg != "off"
-        case "help": model.showHelp = arg == "on"
-        case "quality": if let quality = Quality(rawValue: arg) { model.quality = quality }
-        case "autopilot": model.autopilot = arg == "on"
+        case "tour": if argument == "off" { model.stopTour() } else { model.startTour() }
+        case "zoom": model.zoomStep(Double(argument) ?? -1)
+        case "palette": model.setPalette(Int(argument) ?? 0)
+        case "family": if let family = FractalFamily(rawValue: argument) { model.selectFamily(family) }
+        case "ui": model.showUI = argument != "off"
+        case "help": model.showHelp = argument == "on"
+        case "quality": if let quality = Quality(rawValue: argument) { model.quality = quality }
+        case "autopilot": model.autopilotEngaged = argument == "on"
         case "julia": model.toggleJulia()
-        case "iter": model.iter.maxIter = Int(arg) ?? model.iter.maxIter
-        case "light": model.color.lightStrength = Double(arg) ?? model.color.lightStrength
-        case "density": model.color.density = Double(arg) ?? model.color.density
-        case "mapping": model.color.mapping = Int(arg) ?? model.color.mapping
-        case "edge": model.color.edgeStrength = Double(arg) ?? model.color.edgeStrength
+        case "iter": model.iteration.maxIter = Int(argument) ?? model.iteration.maxIter
+        case "light": model.color.lightStrength = Double(argument) ?? model.color.lightStrength
+        case "density": model.color.density = Double(argument) ?? model.color.density
+        case "mapping": model.color.mapping = Int(argument) ?? model.color.mapping
+        case "edge": model.color.edgeStrength = Double(argument) ?? model.color.edgeStrength
         case "record":
             // record:on / record:<path> writes frame times as CSV and stops recording
-            if arg == "on" {
+            if argument == "on" {
                 model.renderer.resetFrameLog()
                 model.renderer.recordFrames = true
             } else {
@@ -61,33 +61,33 @@ final class DevHooks {
                 let lines = model.renderer.frameLog.map {
                     String(format: "%.4f,%.3f,%.3f,%.5f,%.3f,%.3f", $0.t, $0.gpuMs, $0.scale, $0.log2Radius, $0.pan.x, $0.pan.y)
                 }
-                try? (["t,gpu_ms,scale,log2r,pan_x,pan_y"] + lines).joined(separator: "\n").write(toFile: arg, atomically: true, encoding: .utf8)
+                try? (["t,gpu_ms,scale,log2r,pan_x,pan_y"] + lines).joined(separator: "\n").write(toFile: argument, atomically: true, encoding: .utf8)
                 let slow = model.renderer.slowFrames.map { String(format: "%.4f,%.1f,%@", $0.t, $0.cpuMs, $0.note) }
-                try? slow.joined(separator: "\n").write(toFile: arg + ".slow", atomically: true, encoding: .utf8)
+                try? slow.joined(separator: "\n").write(toFile: argument + ".slow", atomically: true, encoding: .utf8)
                 let passes = model.renderer.passLog.map { String(format: "%.4f,%.2f,%d,%@", $0.t, $0.ms, $0.samples, $0.note) }
-                try? passes.joined(separator: "\n").write(toFile: arg + ".passes", atomically: true, encoding: .utf8)
+                try? passes.joined(separator: "\n").write(toFile: argument + ".passes", atomically: true, encoding: .utf8)
             }
-        case "speed": model.pilot.speed = Double(arg) ?? model.pilot.speed
+        case "speed": model.autopilot.speed = Double(argument) ?? model.autopilot.speed
         case "export-image":
             // export-image:<path> renders a quick 4K image there (the user's remembered settings are put
             // back once the job has taken them); export-image: saves to the image folder as set up
             let export = model.export
-            guard !arg.isEmpty else { return export.exportImage(model: model) }
+            guard !argument.isEmpty else { return export.exportImage(model: model) }
             let (size, samples) = (export.imageSize, export.imageSamples)
             (export.imageSize, export.imageSamples) = (ExportController.imageSizes[0], 4)
-            export.exportImage(model: model, to: URL(fileURLWithPath: arg))
+            export.exportImage(model: model, to: URL(fileURLWithPath: argument))
             (export.imageSize, export.imageSamples) = (size, samples)
         case "export-video":
             // export-video:<path> renders a quick 6-second 1080p video there
             let export = model.export
             let (size, fps, samples) = (export.videoSize, export.fps, export.videoSamples)
             (export.videoSize, export.fps, export.duration, export.videoSamples) = (ExportController.videoSizes[0], 30, 6, 1)
-            export.exportVideo(model: model, to: URL(fileURLWithPath: arg))
+            export.exportVideo(model: model, to: URL(fileURLWithPath: argument))
             (export.videoSize, export.fps, export.videoSamples) = (size, fps, samples)
         case "export-cancel": model.export.cancel()
         case "export-sheet":
             // export-sheet:image / export-sheet:video opens the export sheet; export-sheet:off closes it
-            if let kind = ExportController.Kind.allCases.first(where: { $0.rawValue.lowercased() == arg }) {
+            if let kind = ExportController.Kind.allCases.first(where: { $0.rawValue.lowercased() == argument }) {
                 model.openExport(kind)
             } else {
                 model.showExport = false
@@ -97,38 +97,45 @@ final class DevHooks {
             if let sheet = NSApp.windows.first(where: { $0.isSheet && $0.isVisible }), let content = sheet.contentView,
                let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
                 content.cacheDisplay(in: content.bounds, to: bitmap)
-                if let image = bitmap.cgImage { try? Engine.writePNG(image, to: URL(fileURLWithPath: arg)) }
+                if let image = bitmap.cgImage { try? Engine.writePNG(image, to: URL(fileURLWithPath: argument)) }
             }
         case "movie":
             // movie:<path> records the view to that file; movie:off stops
-            if arg == "off" { model.stopRecording() } else { model.startRecording(to: URL(fileURLWithPath: arg)) }
+            if argument == "off" { model.stopRecording() } else { model.startRecording(to: URL(fileURLWithPath: argument)) }
         case "export-status":
-            let e = model.export
-            try? "running=\(e.running) progress=\(e.progress) status=\(e.status)".write(toFile: arg, atomically: true, encoding: .utf8)
+            let export = model.export
+            try? "running=\(export.running) progress=\(export.progress) status=\(export.status)"
+                .write(toFile: argument, atomically: true, encoding: .utf8)
         case "status":
-            if let s = model.status {
-                let d = model.renderer.drawableSize
+            if let status = model.status {
+                let size = model.renderer.drawableSize
                 let text = String(format: "zoom=%@ iter=%d fps=%.1f gpu=%.2f stage=%@ samples=%d perturbed=%@ drawable=%dx%d",
-                                  s.view.zoomText, s.maxIter, s.fps, s.gpuMs, s.stage.rawValue, s.samples, "\(s.perturbed)", d.x, d.y)
-                try? text.write(toFile: arg, atomically: true, encoding: .utf8)
+                                  status.view.zoomText, status.maxIter, status.fps, status.gpuMs, status.stage.rawValue,
+                                  status.samples, "\(status.perturbed)", size.x, size.y)
+                try? text.write(toFile: argument, atomically: true, encoding: .utf8)
             }
-        case "where": try? model.coordinatesText.write(toFile: arg, atomically: true, encoding: .utf8)
+        case "where": try? model.coordinatesText.write(toFile: argument, atomically: true, encoding: .utf8)
         case "orbit":
             // orbit:x,y shows the orbit at drawable pixel (x, y) as if ⇧ were held there; orbit:off hides it
-            let v = arg.split(separator: ",").compactMap { Double($0) }
-            let points = NSApp.windows.first { $0.isVisible }?.contentView?.bounds.width ?? 1
-            let scale = Double(model.renderer.drawableSize.x) / max(Double(points), 1)
-            if v.count == 2 { model.showOrbit(atPixel: SIMD2(v[0], v[1]), scale: scale) } else { model.orbitHover = nil }
+            let numbers = argument.split(separator: ",").compactMap { Double($0) }
+            let widthInPoints = NSApp.windows.first { $0.isVisible }?.contentView?.bounds.width ?? 1
+            let scale = Double(model.renderer.drawableSize.x) / max(Double(widthInPoints), 1)
+            if numbers.count == 2 {
+                model.showOrbit(atPixel: SIMD2(numbers[0], numbers[1]), scale: scale)
+            } else {
+                model.orbitHover = nil
+            }
         case "hover":
             // hover:x,y,re,im shows the Julia preview as if ⌥ were held at canvas point (x, y); hover:off hides it
-            let v = arg.split(separator: ",").compactMap { Double($0) }
-            model.juliaHover = v.count == 4 ? JuliaHover(point: CGPoint(x: v[0], y: v[1]), re: v[2], im: v[3]) : nil
+            let numbers = argument.split(separator: ",").compactMap { Double($0) }
+            model.juliaHover = numbers.count == 4
+                ? JuliaHover(point: CGPoint(x: numbers[0], y: numbers[1]), re: numbers[2], im: numbers[3]) : nil
         case "windows":
             let lines = NSApp.windows.map { "\(type(of: $0)) visible=\($0.isVisible) key=\($0.isKeyWindow) frame=\($0.frame) content=\($0.contentView.map { "\(type(of: $0))" } ?? "-")" }
-            try? lines.joined(separator: "\n").write(toFile: arg, atomically: true, encoding: .utf8)
+            try? lines.joined(separator: "\n").write(toFile: argument, atomically: true, encoding: .utf8)
         case "settled":
             // writes "1" to the given file once the view is fully refined
-            waitSettled(then: { try? "1".write(toFile: arg, atomically: true, encoding: .utf8) })
+            waitSettled(then: { try? "1".write(toFile: argument, atomically: true, encoding: .utf8) })
         default: NSLog("DevHooks: unknown command %@", command)
         }
     }
@@ -146,22 +153,22 @@ final class DevHooks {
         var image = canvas
         if withUI, let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }),
            let content = window.contentView {
-            let mtk = content.firstSubview(of: FractalMTKView.self)
-            mtk?.isHidden = true
-            if let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
-                content.cacheDisplay(in: content.bounds, to: rep)
-                mtk?.isHidden = false
+            let canvasView = content.firstSubview(of: FractalMTKView.self)
+            canvasView?.isHidden = true
+            if let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
+                content.cacheDisplay(in: content.bounds, to: bitmap)
+                canvasView?.isHidden = false
                 let w = canvas.width, h = canvas.height
-                if let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
-                                       space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
-                   let ui = rep.cgImage {
-                    ctx.draw(canvas, in: CGRect(x: 0, y: 0, width: w, height: h))
-                    ctx.draw(ui, in: CGRect(x: 0, y: 0, width: w, height: h))
-                    if let composed = ctx.makeImage() { image = composed }
+                if let context = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                           space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                           bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+                   let interface = bitmap.cgImage {
+                    context.draw(canvas, in: CGRect(x: 0, y: 0, width: w, height: h))
+                    context.draw(interface, in: CGRect(x: 0, y: 0, width: w, height: h))
+                    if let composed = context.makeImage() { image = composed }
                 }
             }
-            mtk?.isHidden = false
+            canvasView?.isHidden = false
         }
         try? Engine.writePNG(image, to: URL(fileURLWithPath: path))
     }

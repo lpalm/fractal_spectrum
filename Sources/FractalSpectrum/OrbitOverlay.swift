@@ -16,18 +16,18 @@ struct OrbitHover: Equatable {
     var summary: String
 
     /// Orbit of the sample at drawable pixel `pixel` of `view`; `scale` converts pixels to points.
-    init(formula: Formula, view: Viewport, cameraVersion: Int, pixel: SIMD2<Double>, drawable: SIMD2<Int>, scale: Double) {
+    init(formula: Formula, view: Viewport, cameraVersion: Int, pixel: SIMD2<Double>, drawableSize: SIMD2<Int>, scale: Double) {
         self.pixel = pixel
         self.scale = scale
         self.cameraVersion = cameraVersion
         let flipY = formula.family.flipY
-        let c = view.point(atPixel: pixel, width: drawable.x, height: drawable.y, flipY: flipY)
+        let c = view.point(atPixel: pixel, width: drawableSize.x, height: drawableSize.y, flipY: flipY)
         let length = 400
         let orbit = formula.orbit(of: c, count: length)
         // far-away points are drawn at the edge of a generous margin around the canvas
-        let limit = Double(max(drawable.x, drawable.y)) * 4
+        let limit = Double(max(drawableSize.x, drawableSize.y)) * 4
         points = orbit.map { z in
-            let p = view.pixel(of: PlanePoint(Double(z.x), Double(z.y)), width: drawable.x, height: drawable.y, flipY: flipY)
+            let p = view.pixel(of: PlanePoint(Double(z.x), Double(z.y)), width: drawableSize.x, height: drawableSize.y, flipY: flipY)
             return CGPoint(x: min(max(p.x, -limit), limit) / scale, y: min(max(p.y, -limit), limit) / scale)
         }
         pointer = CGPoint(x: pixel.x / scale, y: pixel.y / scale)

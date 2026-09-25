@@ -34,7 +34,7 @@ struct FractalSpectrumApp: App {
                 Button("Zoom In") { model.zoomStep(-1) }.keyboardShortcut("=", modifiers: .command)
                 Button("Zoom Out") { model.zoomStep(1) }.keyboardShortcut("-", modifiers: .command)
                 Divider()
-                Button(model.autopilot ? "Stop Autopilot" : "Start Autopilot") { model.autopilot.toggle() }
+                Button(model.autopilotEngaged ? "Stop Autopilot" : "Start Autopilot") { model.autopilotEngaged.toggle() }
                     .keyboardShortcut("p", modifiers: [])
                 Button("Back") { model.goBack() }.keyboardShortcut("[", modifiers: .command)
                 Button("Forward") { model.goForward() }.keyboardShortcut("]", modifiers: .command)

@@ -19,7 +19,7 @@ typedef unsigned int fs_uint;
 
 #define FS_MAX_BLA_LEVELS 32
 #define FS_ZERO_EXP (-(1 << 24))   // exponent used for exact zeros in extended-range values
-#define FS_INTERIOR 0xFFFFFFFFu
+#define FS_INTERIOR 0xFFFFFFFFu   // GSample.n of samples that never escaped (cycle or iteration limit): drawn as the set
 
 // Formula identifiers (function constant FORMULA).
 #define FS_FORMULA_MANDEL 0      // z^p + c
@@ -31,8 +31,8 @@ typedef unsigned int fs_uint;
 typedef struct {
     fs_uint2 size;          // full target size in samples
     fs_uint2 origin;        // tile origin in samples
-    fs_uint2 bufOrigin;     // sample stored at index 0 of the G-buffer
-    fs_uint bufStride;      // G-buffer row length
+    fs_uint2 bufferOrigin;  // sample stored at index 0 of the G-buffer
+    fs_uint bufferStride;   // G-buffer row length
     fs_uint pad0;
     fs_uint2 workSize;      // rectangle of samples processed by this dispatch
     fs_float2 offsetM;      // mantissa of (view center - reference start); direct kernel: view center
@@ -52,13 +52,13 @@ typedef struct {
     fs_uint statsSlot;
     fs_uint blaOffset[FS_MAX_BLA_LEVELS];
     fs_uint blaCount[FS_MAX_BLA_LEVELS];
-    // Julia sets: second reference (orbit of the critical point 0) that pixels rebase onto.
-    fs_uint refLen2;
-    fs_uint blaLevels2;
+    // Julia sets: the orbit of the critical point 0, which samples rebase onto, and its BLA table.
+    fs_uint criticalRefLen;
+    fs_uint criticalBLALevels;
     fs_uint pad2;
     fs_uint pad3;
-    fs_uint blaOffset2[FS_MAX_BLA_LEVELS];
-    fs_uint blaCount2[FS_MAX_BLA_LEVELS];
+    fs_uint criticalBLAOffset[FS_MAX_BLA_LEVELS];
+    fs_uint criticalBLACount[FS_MAX_BLA_LEVELS];
 } FSIterParams;
 
 // Reference orbit point in extended range: value = m * 2^e.
@@ -78,21 +78,23 @@ typedef struct {
     int pad1;
 } FSBLAEntry;
 
+// Parameters of one BLA build dispatch: level 0 from the reference orbit (bla_init), or a level merged
+// from pairs of entries of the level below (bla_merge).
 typedef struct {
     fs_uint count;          // entries to produce
-    fs_uint srcOffset;      // first source entry (merge) or first reference index (level 0)
-    fs_uint dstOffset;
-    fs_uint srcCount;
-    float log2Eps;
+    fs_uint srcOffset;      // first entry of the level below (bla_merge only)
+    fs_uint dstOffset;      // first entry written
+    float log2Eps;          // relative error tolerated
     float log2C;            // log2 of max |dc| over the image; very negative for Julia sets
     float pad0;
     float pad1;
+    float pad2;
 } FSBLABuildParams;
 
 // Escape statistics accumulated by the iteration kernels.
 typedef struct {
-    fs_uint minIter;        // lowest escaped iteration
-    fs_uint maxIter;        // highest escaped iteration
+    fs_uint lowestEscape;
+    fs_uint highestEscape;
     fs_uint escaped;
     fs_uint lateEscaped;    // escaped in the upper half of the iteration limit
     fs_uint unresolved;     // reached the limit without escaping or a detected cycle
@@ -104,8 +106,8 @@ typedef struct {
 // Parameters of the colouring kernel.
 typedef struct {
     fs_uint2 outSize;
-    fs_uint2 gSize;         // primary G-buffer size
-    fs_uint2 fbSize;        // logical size of the fallback colour image
+    fs_uint2 gBufferSize;   // primary G-buffer size (the source image's size in the upsample pass)
+    fs_uint2 fallbackSize;  // logical size of the fallback colour image
     fs_uint2 tileGrid;      // primary tiles per axis
     fs_uint tileSize;
     fs_uint useFallback;
@@ -140,7 +142,8 @@ typedef struct {
 #endif
 // Escape-time kernels: direct float iteration for shallow views, perturbation with bilinear
 // approximation (BLA) and rebasing for deep views, extended-range floats beyond 1e-18; then colouring
-// and display. ShaderTypes.h is prepended to this source at load time.
+// and display. scripts/gen_shaders.sh prepends ShaderTypes.h and embeds both in
+// Generated/ShaderSource.swift, which the app compiles at launch.
 
 #include <metal_stdlib>
 using namespace metal;
@@ -458,7 +461,7 @@ inline GSample make_sample(bool escaped, uint n, float2 z, Derivative d, constan
 // Output and statistics
 
 inline void store_sample(device GSample *out, constant FSIterParams &P, uint2 pix, GSample g) {
-    out[(pix.y - P.bufOrigin.y) * P.bufStride + (pix.x - P.bufOrigin.x)] = g;
+    out[(pix.y - P.bufferOrigin.y) * P.bufferStride + (pix.x - P.bufferOrigin.x)] = g;
 }
 
 // Folds each thread's outcome into the pass statistics (FSStats, as uints) with one atomic per SIMD group.
@@ -569,32 +572,32 @@ struct CycleWatch {
 };
 
 // Records a closest approach to 0 so far.
-inline void note_approach(thread CycleWatch &c, float log2Z, float z2) {
-    c.markPending = c.markPending || log2Z < c.log2MinZ - 1.0f;
-    c.log2MinZ = log2Z;
-    c.minZ2 = z2;
+inline void note_approach(thread CycleWatch &watch, float log2Z, float z2) {
+    watch.markPending = watch.markPending || log2Z < watch.log2MinZ - 1.0f;
+    watch.log2MinZ = log2Z;
+    watch.minZ2 = z2;
 }
 
 // Chains the derivative of an iteration (or BLA step): M * 2^e.
-inline void note_step(thread CycleWatch &c, float4 M, int e) {
-    if (IS_MANDEL) c.J.xy = cmul(float2(M.x, M.z), c.J.xy);
-    else c.J = matmul(M, c.J);
-    c.e += e;
+inline void note_step(thread CycleWatch &watch, float4 M, int e) {
+    if (IS_MANDEL) watch.J.xy = cmul(float2(M.x, M.z), watch.J.xy);
+    else watch.J = matmul(M, watch.J);
+    watch.e += e;
 }
 
 // Renormalises the derivative; true once it has shrunk by 2^10 since the latest marked approach.
-inline bool cycle_attracts(thread CycleWatch &c) {
-    float a = maxabs(c.J);
+inline bool cycle_attracts(thread CycleWatch &watch) {
+    float a = maxabs(watch.J);
     if (!(a > 0.0f)) return false;
     int k = exponent(a);
-    c.J = scale2(c.J, -k);
-    c.e += k;
-    if (c.markPending) {
-        c.markE = c.e;
-        c.markPending = false;
+    watch.J = scale2(watch.J, -k);
+    watch.e += k;
+    if (watch.markPending) {
+        watch.markE = watch.e;
+        watch.markPending = false;
         return false;
     }
-    return c.e - c.markE < -10;
+    return watch.e - watch.markE < -10;
 }
 
 // Julia sets rebase onto the critical orbit, which they follow from then on. Its BLA bound is loaded
@@ -648,7 +651,8 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
     Orbit orbit = {Z, Zx, bla, blaRadius2, blaLog2Radius, blaLog2MinZ, P.blaOffset, P.blaCount, P.blaLevels,
                    P.refLen - 1, USE_BLA ? blaMaxRadius2[0] : 0.0f};
     Orbit critical = {criticalZ, criticalZx, criticalBLA, criticalBLARadius2, criticalBLALog2Radius,
-                      criticalBLALog2MinZ, P.blaOffset2, P.blaCount2, P.blaLevels2, P.refLen2 - 1, 0.0f};   // see switch_to_critical
+                      criticalBLALog2MinZ, P.criticalBLAOffset, P.criticalBLACount, P.criticalBLALevels,
+                      P.criticalRefLen - 1, 0.0f};   // see switch_to_critical
     bool onCritical = false;
     CycleWatch watch = {IDENTITY, 0, 0, 1e30f, 1e30f, false};
     bool escaped = false, inside = false;
@@ -776,7 +780,6 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
             break;
         }
     }
-    if (escaped && n > maxIter) escaped = false;
     uint outcome = escaped ? OUTCOME_ESCAPED : (inside ? OUTCOME_CYCLE : OUTCOME_UNRESOLVED);
     if (active) store_sample(out, P, pix, make_sample(escaped, escaped ? n : P.maxIter, zEscaped, der, P));
     record_stats(stats, active, outcome, n, P.maxIter, P.statsSlot);
@@ -828,14 +831,14 @@ kernel void bla_init(device FSBLAEntry *entries [[buffer(0)]],
         A = scale2(A, -k);
         Ae += k;
     }
-    FSBLAEntry e;
-    e.A = A;
-    e.Ae = Ae;
-    e.B = float4(0.5f, 0.0f, 0.0f, 0.5f);
-    e.Be = 1;
-    e.pad0 = 0;
-    e.pad1 = 0;
-    entries[p.dstOffset + i] = e;
+    FSBLAEntry entry;
+    entry.A = A;
+    entry.Ae = Ae;
+    entry.B = float4(0.5f, 0.0f, 0.0f, 0.5f);
+    entry.Be = 1;
+    entry.pad0 = 0;
+    entry.pad1 = 0;
+    entries[p.dstOffset + i] = entry;
     log2MinZ[p.dstOffset + i] = log2Z;
     log2Radius[p.dstOffset + i] = log2R;
     float r2 = log2R >= -62.0f ? exp2(2.0f * log2R) : 0.0f;
@@ -890,15 +893,15 @@ kernel void bla_merge(device FSBLAEntry *entries [[buffer(0)]],
     float log2R;
     if (log2Rx <= -1e29f || log2Ry <= log2NormB) log2R = -1e30f;
     else log2R = min(log2Rx, log2Ry + log2(1.0f - exp2(log2NormB - log2Ry)) - log2NormA);
-    FSBLAEntry e;
-    e.A = A;
-    e.Ae = Ae;
-    e.B = B;
-    e.Be = Be;
-    e.pad0 = 0;
-    e.pad1 = 0;
+    FSBLAEntry entry;
+    entry.A = A;
+    entry.Ae = Ae;
+    entry.B = B;
+    entry.Be = Be;
+    entry.pad0 = 0;
+    entry.pad1 = 0;
     uint o = p.dstOffset + i;
-    entries[o] = e;
+    entries[o] = entry;
     log2MinZ[o] = min(log2MinZ[xi], log2MinZ[yi]);
     log2Radius[o] = log2R;
     radius2[o] = log2R >= -62.0f ? exp2(2.0f * log2R) : 0.0f;
@@ -927,14 +930,14 @@ kernel void color_origin(device const uint *stats [[buffer(7)]],
                          uint i [[thread_position_in_grid]]) {
     if (i > 0) return;
     uint slot = uint(args.x);
-    uint lo = stats[slot * 8 + 0], hi = stats[slot * 8 + 1], escaped = stats[slot * 8 + 2];
+    uint escaped = stats[slot * 8 + 2];
     float4 o = origin[0];
     bool snap = args.y == 1.0f || o.w == 0.0f;
     if (escaped == 0u) {
         if (snap) origin[0].w = 0.0f;
         return;
     }
-    float low = float(lo), high = float(hi);
+    float low = float(stats[slot * 8 + 0]), high = float(stats[slot * 8 + 1]);   // lowest and highest escape
     float k = exp2(args.z);
     float target = max((k * (1.0f + low) - (1.0f + high)) / (k - 1.0f), 0.0f);
     float rate = snap ? 1.0f : (high - low < 32.0f ? 0.0f : args.y);
@@ -1018,8 +1021,8 @@ kernel void colorize(texture2d<float, access::read_write> accumulator [[texture(
         uint2 tile = min(o / C.tileSize, C.tileGrid - 1);
         computed = tileDone[tile.y * C.tileGrid.x + tile.x] != 0u;
     }
-    float3 col = computed ? shade(samples[o.y * C.gSize.x + o.x], C, origin[0], palette, paletteSampler)
-                          : upsample_color(fallback, C.fbSize, C.outSize, o);
+    float3 col = computed ? shade(samples[o.y * C.gBufferSize.x + o.x], C, origin[0], palette, paletteSampler)
+                          : upsample_color(fallback, C.fallbackSize, C.outSize, o);
     float4 previous = C.accumulate != 0u ? accumulator.read(o) : float4(0.0f);
     accumulator.write(previous + float4(col, 1.0f), o);
 }
@@ -1031,9 +1034,9 @@ kernel void shade_samples(texture2d<float, access::write> image [[texture(0)]],
                           constant FSColorParams &C [[buffer(3)]],
                           device const float4 *origin [[buffer(4)]],
                           uint2 o [[thread_position_in_grid]]) {
-    if (o.x >= C.gSize.x || o.y >= C.gSize.y) return;
+    if (o.x >= C.gBufferSize.x || o.y >= C.gBufferSize.y) return;
     constexpr sampler paletteSampler(filter::linear, s_address::repeat, t_address::clamp_to_edge);
-    image.write(float4(shade(samples[o.y * C.gSize.x + o.x], C, origin[0], palette, paletteSampler), 1.0f), o);
+    image.write(float4(shade(samples[o.y * C.gBufferSize.x + o.x], C, origin[0], palette, paletteSampler), 1.0f), o);
 }
 
 // Scales a coloured preview up into the accumulator (one sample).
@@ -1042,7 +1045,7 @@ kernel void upsample(texture2d<float, access::read> image [[texture(0)]],
                      constant FSColorParams &C [[buffer(3)]],
                      uint2 o [[thread_position_in_grid]]) {
     if (o.x >= C.outSize.x || o.y >= C.outSize.y) return;
-    accumulator.write(float4(upsample_color(image, C.gSize, C.outSize, o), 1.0f), o);
+    accumulator.write(float4(upsample_color(image, C.gBufferSize, C.outSize, o), 1.0f), o);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1067,6 +1070,8 @@ inline float3 average(texture2d<float, access::read> accumulator, int2 p, uint2 
     return a.rgb / max(a.w, 1e-6f);
 }
 
+// Shows the accumulator (the average of its samples), reprojected to the current view, as sRGB with
+// dither or as extended-range Display P3.
 kernel void present(texture2d<float, access::read> accumulator [[texture(0)]],
                     texture2d<float, access::write> target [[texture(1)]],
                     constant FSPresentParams &P [[buffer(0)]],
@@ -1103,8 +1108,8 @@ kernel void present(texture2d<float, access::read> accumulator [[texture(0)]],
         return;
     }
     // triangular dither of one 8-bit step against banding in smooth gradients
-    float n = hash12(float2(o)) + hash12(float2(o) + 17.13f) - 1.0f;
-    float3 s = float3(srgb_encode(c.r), srgb_encode(c.g), srgb_encode(c.b)) + n * (1.0f / 255.0f);
-    target.write(float4(s, 1.0f), o);
+    float dither = hash12(float2(o)) + hash12(float2(o) + 17.13f) - 1.0f;
+    float3 encoded = float3(srgb_encode(c.r), srgb_encode(c.g), srgb_encode(c.b)) + dither * (1.0f / 255.0f);
+    target.write(float4(encoded, 1.0f), o);
 }
 """#

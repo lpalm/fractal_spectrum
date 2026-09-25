@@ -91,7 +91,7 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .onAppear {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                model.show("Scroll to zoom · T for a guided tour · ? for shortcuts", duration: 4)
+                model.announce("Scroll to zoom · T for a guided tour · ? for shortcuts", duration: 4)
             }
             thumbnails.requestAll()
         }

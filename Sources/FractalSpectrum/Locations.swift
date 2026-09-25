@@ -26,7 +26,7 @@ struct Location: Identifiable, Hashable, Codable {
 
     /// Magnification for a tile's badge: "40×" or "10³⁰".
     var depthText: String {
-        zoom < 3 ? String(format: "%.0f×", pow(10, zoom)) : ScaleFact.power(Int(zoom.rounded()))
+        zoom < 3 ? String(format: "%.0f×", pow(10, zoom)) : Magnification.power(Int(zoom.rounded()))
     }
 
     // places are identified by their id

@@ -1,8 +1,8 @@
 import Foundation
 import FractalKit
 
-/// Human-scale comparisons for magnifications.
-enum ScaleFact {
+/// Formats magnifications ("1.2 × 10³⁰") and compares them with familiar sizes.
+enum Magnification {
     private static let superscripts: [Character: Character] = [
         "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "-": "⁻",
     ]
@@ -12,35 +12,35 @@ enum ScaleFact {
         "10" + String(String(e).compactMap { superscripts[$0] })
     }
 
-    /// "1.2 × 10³⁰" style magnification.
-    static func magnification(_ zoomLog10: Double) -> String {
+    /// "40×" or "1.2 × 10³⁰" for a magnification of 10^zoomLog10.
+    static func text(_ zoomLog10: Double) -> String {
         if zoomLog10 < 3 { return String(format: "%.0f×", pow(10, zoomLog10)) }
         let (m, e) = scientific(log10: zoomLog10, digits: 1)
         return String(format: "%.1f × ", m) + power(e)
     }
 
     /// What the view's width would be if the whole set were scaled up to a familiar size.
-    static func describe(zoomLog10 z: Double) -> String {
+    static func comparison(zoomLog10: Double) -> String {
         // full set ≈ 4 units wide
-        let objects: [(Double, String)] = [
+        let objects: [(size: Double, name: String)] = [
             (1e-2, "a coin"), (1e-3, "a grain of sand"), (1e-4, "a human hair's width"), (1e-5, "a single cell"),
             (1e-6, "a bacterium"), (1e-7, "a virus"), (1e-9, "a strand of DNA"), (1e-10, "an atom"),
             (1e-14, "an atomic nucleus"), (1e-15, "a proton"),
         ]
         let earth = log10(1.27e7)   // metres
-        let viewEarth = earth - z
+        let viewEarth = earth - zoomLog10
         if viewEarth > -2 { return "" }
         if viewEarth > -15.5 {
-            let best = objects.min { abs(log10($0.0) - viewEarth) < abs(log10($1.0) - viewEarth) }!
-            return "If the whole set were as wide as the Earth, this view would be the size of \(best.1)."
+            let best = objects.min { abs(log10($0.size) - viewEarth) < abs(log10($1.size) - viewEarth) }!
+            return "If the whole set were as wide as the Earth, this view would be the size of \(best.name)."
         }
         let universe = log10(8.8e26)
         let planck = log10(1.6e-35)
-        let viewUniverse = universe - z
+        let viewUniverse = universe - zoomLog10
         if viewUniverse > planck + 1 {
-            let best = objects.min { abs(log10($0.0) - viewUniverse) < abs(log10($1.0) - viewUniverse) }!
+            let best = objects.min { abs(log10($0.size) - viewUniverse) < abs(log10($1.size) - viewUniverse) }!
             if viewUniverse > -15.5 {
-                return "If the whole set spanned the observable universe, this view would be the size of \(best.1)."
+                return "If the whole set spanned the observable universe, this view would be the size of \(best.name)."
             }
             return "If the whole set spanned the observable universe, this view would be \(power(Int(-viewUniverse - 15))) times smaller than a proton."
         }

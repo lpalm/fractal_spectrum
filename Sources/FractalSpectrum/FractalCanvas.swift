@@ -13,7 +13,7 @@ final class FractalMTKView: MTKView {
     private var dragging = false
 
     /// Set by ⌥-scroll zooming, so that the Julia preview stays hidden until ⌥ is released.
-    private var hoverSuppressed = false
+    private var juliaHoverSuppressed = false
 
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -54,15 +54,17 @@ final class FractalMTKView: MTKView {
         model?.renderer.frameBudgetMs = 1000 / max(hz, 30) * 0.72
     }
 
-    private var scale: Double { Double(window?.backingScaleFactor ?? 2) }
+    /// Drawable pixels per point.
+    private var backingScale: Double { Double(window?.backingScaleFactor ?? 2) }
     private var pixelSize: (Int, Int) { (Int(drawableSize.width), Int(drawableSize.height)) }
 
     /// Drawable pixel coordinates (origin top-left) of a point in view coordinates.
-    private func pixel(_ p: CGPoint) -> SIMD2<Double> {
-        SIMD2(Double(p.x) * scale, Double(bounds.height - p.y) * scale)
+    private func pixel(_ point: CGPoint) -> SIMD2<Double> {
+        SIMD2(Double(point.x) * backingScale, Double(bounds.height - point.y) * backingScale)
     }
 
-    private func location(_ event: NSEvent) -> SIMD2<Double> { pixel(convert(event.locationInWindow, from: nil)) }
+    /// Drawable pixel coordinates of an event's location.
+    private func pixel(of event: NSEvent) -> SIMD2<Double> { pixel(convert(event.locationInWindow, from: nil)) }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -85,7 +87,7 @@ final class FractalMTKView: MTKView {
 
     private func updateHover(_ flags: NSEvent.ModifierFlags) {
         // ⌥ can be released while another app is active, without a flagsChanged here
-        if !flags.contains(.option) { hoverSuppressed = false }
+        if !flags.contains(.option) { juliaHoverSuppressed = false }
         updateJuliaHover(option: flags.contains(.option))
         updateOrbit(shift: flags.contains(.shift) && !flags.contains(.command))
     }
@@ -93,25 +95,27 @@ final class FractalMTKView: MTKView {
     /// Shows the orbit of the point under the pointer while ⇧ is held.
     private func updateOrbit(shift: Bool) {
         guard let model, let window else { return }
-        let p = convert(window.mouseLocationOutsideOfEventStream, from: nil)
-        guard shift, bounds.contains(p) else {
+        let pointer = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        guard shift, bounds.contains(pointer) else {
             if model.orbitHover != nil { model.orbitHover = nil }
             return
         }
-        model.showOrbit(atPixel: pixel(p), scale: scale)
+        model.showOrbit(atPixel: pixel(pointer), scale: backingScale)
     }
 
     /// Shows the Julia set of the parameter under the pointer while ⌥ is held over the Mandelbrot set.
     private func updateJuliaHover(option: Bool) {
         guard let model, let window else { return }
-        let p = convert(window.mouseLocationOutsideOfEventStream, from: nil)
-        guard option, !hoverSuppressed, model.formula.family == .mandelbrot, !model.formula.julia, bounds.contains(p) else {
+        let pointer = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        guard option, !juliaHoverSuppressed, model.formula.family == .mandelbrot, !model.formula.julia,
+              bounds.contains(pointer) else {
             if model.juliaHover != nil { model.juliaHover = nil }
             return
         }
         let (w, h) = pixelSize
-        let c = model.camera.view.point(atPixel: pixel(p), width: w, height: h, flipY: false)
-        model.juliaHover = JuliaHover(point: CGPoint(x: p.x, y: bounds.height - p.y), re: c.re.doubleValue, im: c.im.doubleValue)
+        let c = model.camera.view.point(atPixel: pixel(pointer), width: w, height: h, flipY: false)
+        model.juliaHover = JuliaHover(point: CGPoint(x: pointer.x, y: bounds.height - pointer.y), re: c.re.doubleValue,
+                                      im: c.im.doubleValue)
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -119,16 +123,16 @@ final class FractalMTKView: MTKView {
         let (w, h) = pixelSize
         let zoomModifier = event.modifierFlags.contains(.command) || event.modifierFlags.contains(.option)
         if event.modifierFlags.contains(.option) {
-            hoverSuppressed = true
+            juliaHoverSuppressed = true
             model.juliaHover = nil
         }
         if event.hasPreciseScrollingDeltas && !zoomModifier {
             // trackpad: two-finger scroll pans, momentum included
-            model.camera.pan(pixels: SIMD2(Double(event.scrollingDeltaX), Double(event.scrollingDeltaY)) * scale, width: w, height: h)
+            model.camera.pan(pixels: SIMD2(Double(event.scrollingDeltaX), Double(event.scrollingDeltaY)) * backingScale, width: w, height: h)
             model.userInteracted()
         } else {
             let dy = event.hasPreciseScrollingDeltas ? Double(event.scrollingDeltaY) * 0.02 : Double(event.scrollingDeltaY) * 0.18
-            model.camera.zoom(log2Factor: -dy, at: location(event), width: w, height: h, animated: true)
+            model.camera.zoom(log2Factor: -dy, at: pixel(of: event), width: w, height: h, animated: true)
             model.userInteracted()
         }
     }
@@ -136,7 +140,7 @@ final class FractalMTKView: MTKView {
     override func magnify(with event: NSEvent) {
         guard let model else { return }
         let (w, h) = pixelSize
-        model.camera.zoom(log2Factor: -log2(max(0.2, 1 + Double(event.magnification))), at: location(event),
+        model.camera.zoom(log2Factor: -log2(max(0.2, 1 + Double(event.magnification))), at: pixel(of: event),
                           width: w, height: h, animated: false)
         model.userInteracted()
     }
@@ -152,13 +156,13 @@ final class FractalMTKView: MTKView {
         window?.makeFirstResponder(self)
         if event.clickCount == 2 {
             let (w, h) = pixelSize
-            let f = event.modifierFlags.contains(.option) ? 2.0 : -2.0
-            model.camera.zoom(log2Factor: f, at: location(event), width: w, height: h, animated: true)
+            let log2Factor = event.modifierFlags.contains(.option) ? 2.0 : -2.0
+            model.camera.zoom(log2Factor: log2Factor, at: pixel(of: event), width: w, height: h, animated: true)
             model.userInteracted()
             return
         }
         if event.modifierFlags.contains(.option) && model.formula.family == .mandelbrot && !model.formula.julia {
-            model.pickJulia(atPixel: location(event))
+            model.pickJulia(atPixel: pixel(of: event))
             return
         }
         model.camera.stopMotion()
@@ -171,7 +175,7 @@ final class FractalMTKView: MTKView {
     override func mouseDragged(with event: NSEvent) {
         guard let model, dragging, let last = lastDrag else { return }
         let (w, h) = pixelSize
-        let d = SIMD2(Double(event.locationInWindow.x - last.point.x), Double(last.point.y - event.locationInWindow.y)) * scale
+        let d = SIMD2(Double(event.locationInWindow.x - last.point.x), Double(last.point.y - event.locationInWindow.y)) * backingScale
         model.camera.pan(pixels: d, width: w, height: h)
         let dt = max(event.timestamp - last.time, 1e-3)
         dragVelocity = dragVelocity * 0.5 + (d / dt) * 0.5
@@ -192,7 +196,7 @@ final class FractalMTKView: MTKView {
     override func rightMouseDown(with event: NSEvent) {
         guard let model else { return }
         let (w, h) = pixelSize
-        model.camera.zoom(log2Factor: 2, at: location(event), width: w, height: h, animated: true)
+        model.camera.zoom(log2Factor: 2, at: pixel(of: event), width: w, height: h, animated: true)
         model.userInteracted()
     }
 
@@ -207,7 +211,7 @@ final class FractalMTKView: MTKView {
     override func keyDown(with event: NSEvent) {
         guard let model else { return }
         let (w, h) = pixelSize
-        let centre = SIMD2(Double(w), Double(h)) * 0.5
+        let center = SIMD2(Double(w), Double(h)) * 0.5
         let flingSpeed = Double(min(w, h)) * 0.72   // pixels per second
         switch Int(event.keyCode) {
         case kVK_LeftArrow: model.camera.fling(velocity: SIMD2(flingSpeed, 0))
@@ -219,8 +223,8 @@ final class FractalMTKView: MTKView {
             return
         default:
             switch event.charactersIgnoringModifiers?.lowercased() {
-            case "=", "+": model.camera.zoom(log2Factor: -1, at: centre, width: w, height: h, animated: true)
-            case "-", "_": model.camera.zoom(log2Factor: 1, at: centre, width: w, height: h, animated: true)
+            case "=", "+": model.camera.zoom(log2Factor: -1, at: center, width: w, height: h, animated: true)
+            case "-", "_": model.camera.zoom(log2Factor: 1, at: center, width: w, height: h, animated: true)
             case "q": model.camera.rotate(by: .pi / 12, animated: true)
             case "e": model.camera.rotate(by: -.pi / 12, animated: true)
             case "h": model.goHome()
@@ -232,7 +236,7 @@ final class FractalMTKView: MTKView {
             case "[": model.scaleIterations(0.5)
             case "l": model.toggleLighting()
             case "f": window?.toggleFullScreen(nil)
-            case "p": model.autopilot.toggle()
+            case "p": model.autopilotEngaged.toggle()
             // the keys below leave the tour and the autopilot running
             case "m": model.findMinibrot(); return
             case "b": model.addBookmark(); return
@@ -252,23 +256,23 @@ struct FractalCanvas: NSViewRepresentable {
     let model: AppModel
 
     func makeNSView(context: Context) -> FractalMTKView {
-        let v = FractalMTKView(frame: .zero, device: GPU.shared.device)
-        v.model = model
-        v.colorPixelFormat = .bgra8Unorm
-        v.framebufferOnly = false
-        v.preferredFramesPerSecond = 120
-        v.isPaused = false
-        v.enableSetNeedsDisplay = false
-        v.autoResizeDrawable = true
-        v.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-        if let layer = v.layer as? CAMetalLayer {
+        let view = FractalMTKView(frame: .zero, device: GPU.shared.device)
+        view.model = model
+        view.colorPixelFormat = .bgra8Unorm
+        view.framebufferOnly = false
+        view.preferredFramesPerSecond = 120
+        view.isPaused = false
+        view.enableSetNeedsDisplay = false
+        view.autoResizeDrawable = true
+        view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        if let layer = view.layer as? CAMetalLayer {
             layer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
             layer.maximumDrawableCount = 3
             layer.displaySyncEnabled = true
             layer.allowsNextDrawableTimeout = true
         }
-        v.delegate = model.renderer
-        return v
+        view.delegate = model.renderer
+        return view
     }
 
     func updateNSView(_ nsView: FractalMTKView, context: Context) {}

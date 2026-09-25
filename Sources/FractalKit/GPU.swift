@@ -16,7 +16,8 @@ public final class GPU: @unchecked Sendable {
     /// A kernel and the function constants it is specialised for (escape-time and BLA kernels only).
     struct PipelineKey: Hashable {
         var name: String
-        var formula: Int32 = 0
+        /// FS_FORMULA_*.
+        var family: Int32 = 0
         var power: Int32 = 2
         var julia = false
         var useBLA = false
@@ -68,10 +69,10 @@ public final class GPU: @unchecked Sendable {
             let function: MTLFunction
             if GPU.specializedKernels.contains(key.name) {
                 let values = MTLFunctionConstantValues()
-                var formula = key.formula, power = key.power
+                var family = key.family, power = key.power
                 var julia = key.julia, useBLA = key.useBLA, derivative = key.derivative, deep = key.deep
                 var interior = key.interior
-                values.setConstantValue(&formula, type: .int, index: 0)
+                values.setConstantValue(&family, type: .int, index: 0)
                 values.setConstantValue(&power, type: .int, index: 1)
                 values.setConstantValue(&julia, type: .bool, index: 2)
                 values.setConstantValue(&useBLA, type: .bool, index: 3)

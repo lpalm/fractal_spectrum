@@ -289,7 +289,7 @@ struct PlaceTile: View {
         .onHover { hover = $0 }
         .animation(.easeOut(duration: 0.15), value: hover)
         .animation(.easeOut(duration: 0.3), value: image != nil)
-        .help("\(location.name) · \(location.formula.displayName) · " + ScaleFact.magnification(location.zoom))
+        .help("\(location.name) · \(location.formula.displayName) · " + Magnification.text(location.zoom))
     }
 }
 
@@ -367,11 +367,11 @@ struct QualitySection: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Iterations")
                         .font(.rounded(12, .medium))
-                    Text(model.iter.maxIter.formatted())
+                    Text(model.iteration.maxIter.formatted())
                         .font(.rounded(15, .semibold))
                         .monospacedDigit()
                         .contentTransition(.numericText())
-                        .animation(.snappy, value: model.iter.maxIter)
+                        .animation(.snappy, value: model.iteration.maxIter)
                 }
                 Spacer()
                 Button { model.scaleIterations(0.5) } label: { Image(systemName: "minus") }
@@ -382,7 +382,7 @@ struct QualitySection: View {
                     .buttonStyle(.glass)
                     .help("Double iterations (])")
                     .accessibilityLabel("Double iterations")
-                Toggle("Auto", isOn: $model.iter.autoIterations)
+                Toggle("Auto", isOn: $model.iteration.autoIterations)
                     .font(.rounded(12, .medium))
                     .toggleStyle(.switch)
                     .controlSize(.mini)
@@ -412,7 +412,7 @@ struct ExportSection: View {
                     HStack {
                         Text(model.export.status)
                         Spacer()
-                        Text(model.export.eta)
+                        Text(model.export.remainingTimeText)
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                     }
@@ -492,7 +492,7 @@ struct PaletteStrip: View {
     let palette: Palette
 
     var body: some View {
-        let colors = PaletteBank.swatch(palette, count: 48).map { Color(red: $0.x, green: $0.y, blue: $0.z) }
+        let colors = palette.swatchColors(count: 48).map { Color(red: $0.x, green: $0.y, blue: $0.z) }
         LinearGradient(colors: colors, startPoint: .leading, endPoint: .trailing)
     }
 }

@@ -12,6 +12,7 @@ public final class Exporter: @unchecked Sendable {
 
     public init() {}
 
+    /// A still-image export: scene, colours, size and anti-aliasing samples.
     public struct ImageJob: @unchecked Sendable {
         public var scene: FractalScene
         public var color: ColorSettings
@@ -41,12 +42,14 @@ public final class Exporter: @unchecked Sendable {
         try Engine.writePNG(image, to: url)
     }
 
+    /// Video codecs offered for zoom videos.
     public enum Codec: String, CaseIterable, Sendable, Identifiable {
         case hevc = "HEVC"
         case prores = "ProRes 422 HQ"
         public var id: String { rawValue }
     }
 
+    /// A zoom video from `start` to `target`: look, size, timing and encoding.
     public struct VideoJob: @unchecked Sendable {
         public var formula: Formula
         public var target: Viewport
@@ -83,6 +86,24 @@ public final class Exporter: @unchecked Sendable {
 
         public var frameCount: Int { max(1, Int((duration * Double(fps)).rounded())) }
 
+        /// Encoder settings apart from the frame size.
+        var encoderSettings: [String: Any] {
+            switch codec {
+            case .hevc:
+                let bitsPerPixel = 0.35
+                return [
+                    AVVideoCodecKey: AVVideoCodecType.hevc,
+                    AVVideoCompressionPropertiesKey: [
+                        AVVideoAverageBitRateKey: Int(Double(width * height * fps) * bitsPerPixel),
+                        AVVideoExpectedSourceFrameRateKey: fps,
+                        AVVideoMaxKeyFrameIntervalKey: fps,
+                    ] as [String: Any],
+                ]
+            case .prores:
+                return [AVVideoCodecKey: AVVideoCodecType.proRes422HQ]
+            }
+        }
+
         /// Share of the video spent speeding up at the start, and again slowing down at the end.
         public static let easing = 0.08
 
@@ -104,22 +125,24 @@ public final class Exporter: @unchecked Sendable {
             }
             let clamped = min(max(t, 0), 1)
             let u = position(clamped) / position(1)
-            var v = target
-            v.log2Radius = start.log2Radius + (target.log2Radius - start.log2Radius) * u
-            let k = pow(exp2(v.log2Radius - start.log2Radius), 1.6)
-            v.center = target.center.offset(by: start.center.minus(target.center) * k, precision: target.center.precision)
-            v.rotation = start.rotation + (target.rotation - start.rotation) * u + spin * .pi / 180 * clamped
-            return v
+            var view = target
+            view.log2Radius = start.log2Radius + (target.log2Radius - start.log2Radius) * u
+            let k = pow(exp2(view.log2Radius - start.log2Radius), 1.6)
+            view.center = target.center.offset(by: start.center.minus(target.center) * k, precision: target.center.precision)
+            view.rotation = start.rotation + (target.rotation - start.rotation) * u + spin * .pi / 180 * clamped
+            return view
         }
     }
 
     /// Renders a zoom video. `progress(fraction, previewImage)` returns false to cancel.
     public func exportVideo(_ job: VideoJob, to url: URL,
                             progress: @escaping (Double, CGImage?) -> Bool) throws {
-        let movie = try MovieWriter(url: url, job: job)
+        let movie = try VideoWriter(url: url, fileType: job.codec == .prores ? .mov : .mp4, width: job.width,
+                                    height: job.height, settings: job.encoderSettings, realTime: false)
+        movie.startSession(at: .zero)
         let frames = job.frameCount
-        var iter = IterationSettings()
-        iter.maxIter = 1000
+        var iteration = IterationSettings()
+        iteration.maxIter = IterationTuner.lowestLimit
         let renderer = FrameRenderer(engine: engine, width: job.width, height: job.height)
         engine.colorOrigin = nil
         // One reference at the target serves every frame (they all contain it).
@@ -131,25 +154,30 @@ public final class Exporter: @unchecked Sendable {
             let view = job.view(at: t)
             var color = job.color
             color.offset = (color.offset + job.colorCycle * Double(frame) / Double(job.fps)).truncatingRemainder(dividingBy: 1)
-            let (pixelBuffer, texture) = try movie.nextFrame()
+            guard let (pixelBuffer, cvTexture) = movie.makeFrame(), let texture = CVMetalTextureGetTexture(cvTexture)
+            else { throw movie.failure }
             // as in a live flight, colours settle faster towards the end, so the video arrives at the
             // colours its last view has on screen
             let zoomed = previousView.map { (view.log2Radius - $0.log2Radius) * (t > 0.8 ? 4 : 1) }
-            let (stats, gpuMs) = renderer.render(scene: FractalScene(formula: job.formula, view: view, iter: iter),
-                                                 color: color, samples: job.samples, into: texture, zoomed: zoomed)
+            let scene = FractalScene(formula: job.formula, view: view, iteration: iteration)
+            // the Core Video texture must outlive the GPU's drawing into it
+            let (stats, gpuMs) = withExtendedLifetime(cvTexture) {
+                renderer.render(scene: scene, color: color, samples: job.samples, into: texture, zoomed: zoomed)
+            }
             previousView = view
             // iterations only ever grow during a zoom-in, so colours never jump back
-            let proposal = IterationTuner.adjustOffline(maxIter: iter.maxIter, stats: stats, samples: job.width * job.height,
+            let proposal = IterationTuner.adjustOffline(maxIter: iteration.maxIter, stats: stats, samples: job.width * job.height,
                                                         gpuMs: gpuMs, passes: job.samples)
-            iter.maxIter = max(iter.maxIter, proposal)
-            movie.append(pixelBuffer, frame: frame)
+            iteration.maxIter = max(iteration.maxIter, proposal)
+            while !movie.isReadyForMoreMediaData { Thread.sleep(forTimeInterval: 0.002) }
+            movie.append(pixelBuffer, at: CMTime(value: CMTimeValue(frame), timescale: CMTimeScale(job.fps)))
             let preview = frame % 10 == 0 ? Exporter.image(from: pixelBuffer) : nil
             if !progress(Double(frame + 1) / Double(frames), preview) {
                 movie.cancel()
                 throw CocoaError(.userCancelled)
             }
         }
-        try movie.finish()
+        try movie.finishAndWait()
     }
 
     /// The pixels of a BGRA pixel buffer as an image (for previews).
@@ -164,82 +192,6 @@ public final class Exporter: @unchecked Sendable {
                                       bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
         else { return nil }
         return context.makeImage()
-    }
-}
-
-/// Writes the frames of a zoom video, handing out Metal-backed pixel buffers to render into.
-private final class MovieWriter {
-    private let writer: AVAssetWriter
-    private let input: AVAssetWriterInput
-    private let adaptor: AVAssetWriterInputPixelBufferAdaptor
-    private let textureCache: CVMetalTextureCache
-    private let job: Exporter.VideoJob
-
-    init(url: URL, job: Exporter.VideoJob) throws {
-        self.job = job
-        try? FileManager.default.removeItem(at: url)
-        writer = try AVAssetWriter(outputURL: url, fileType: job.codec == .prores ? .mov : .mp4)
-        var settings: [String: Any] = [AVVideoWidthKey: job.width, AVVideoHeightKey: job.height]
-        switch job.codec {
-        case .hevc:
-            let bitsPerPixel = 0.35
-            settings[AVVideoCodecKey] = AVVideoCodecType.hevc
-            settings[AVVideoCompressionPropertiesKey] = [
-                AVVideoAverageBitRateKey: Int(Double(job.width * job.height * job.fps) * bitsPerPixel),
-                AVVideoExpectedSourceFrameRateKey: job.fps,
-                AVVideoMaxKeyFrameIntervalKey: job.fps,
-            ] as [String: Any]
-        case .prores:
-            settings[AVVideoCodecKey] = AVVideoCodecType.proRes422HQ
-        }
-        input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
-        input.expectsMediaDataInRealTime = false
-        adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferWidthKey as String: job.width,
-            kCVPixelBufferHeightKey as String: job.height,
-            kCVPixelBufferMetalCompatibilityKey as String: true,
-        ])
-        guard writer.canAdd(input) else { throw CocoaError(.fileWriteUnknown) }
-        writer.add(input)
-        guard writer.startWriting() else { throw writer.error ?? CocoaError(.fileWriteUnknown) }
-        writer.startSession(atSourceTime: .zero)
-        var cache: CVMetalTextureCache?
-        CVMetalTextureCacheCreate(nil, nil, GPU.shared.device, nil, &cache)
-        guard let cache else { throw CocoaError(.fileWriteUnknown) }
-        textureCache = cache
-    }
-
-    /// A pixel buffer for the next frame and a texture of it to render into.
-    func nextFrame() throws -> (CVPixelBuffer, MTLTexture) {
-        guard let pool = adaptor.pixelBufferPool else { throw writer.error ?? CocoaError(.fileWriteUnknown) }
-        var pixelBuffer: CVPixelBuffer?
-        CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pixelBuffer)
-        guard let pixelBuffer else { throw CocoaError(.fileWriteUnknown) }
-        var cvTexture: CVMetalTexture?
-        CVMetalTextureCacheCreateTextureFromImage(nil, textureCache, pixelBuffer, nil, .bgra8Unorm, job.width, job.height,
-                                                  0, &cvTexture)
-        guard let cvTexture, let texture = CVMetalTextureGetTexture(cvTexture) else { throw CocoaError(.fileWriteUnknown) }
-        return (pixelBuffer, texture)
-    }
-
-    /// Appends a rendered frame, waiting for the encoder to take it.
-    func append(_ pixelBuffer: CVPixelBuffer, frame: Int) {
-        while !input.isReadyForMoreMediaData { Thread.sleep(forTimeInterval: 0.002) }
-        adaptor.append(pixelBuffer, withPresentationTime: CMTime(value: CMTimeValue(frame), timescale: CMTimeScale(job.fps)))
-    }
-
-    func cancel() {
-        input.markAsFinished()
-        writer.cancelWriting()
-    }
-
-    func finish() throws {
-        input.markAsFinished()
-        let done = DispatchSemaphore(value: 0)
-        writer.finishWriting { done.signal() }
-        done.wait()
-        if writer.status != .completed { throw writer.error ?? CocoaError(.fileWriteUnknown) }
     }
 }
 

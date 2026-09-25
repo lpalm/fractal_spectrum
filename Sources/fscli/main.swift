@@ -42,7 +42,7 @@ func makeScene() -> FractalScene {
     let julia = arguments.string("julia", "").split(separator: ",").compactMap { Double($0) }
     if julia.count == 2 { (formula.juliaRe, formula.juliaIm) = (julia[0], julia[1]) }
     var view = Viewport.home(for: formula)
-    if let zoom = arguments.values["zoom"].flatMap(Double.init) { view.log2Radius = 1 - zoom / log10(2.0) }
+    if let zoom = arguments.values["zoom"].flatMap(Double.init) { view.log2Radius = Viewport.log2Radius(zoomLog10: zoom) }
     let precision = max(64, Int(1 - view.log2Radius) + 96)
     if let re = arguments.values["re"], let im = arguments.values["im"],
        let center = PlanePoint(re: re, im: im, precision: precision) {
@@ -51,13 +51,13 @@ func makeScene() -> FractalScene {
         view.center = view.center.withPrecision(precision)
     }
     view.rotation = arguments.double("rot", 0) * .pi / 180
-    var iter = IterationSettings()
-    iter.maxIter = arguments.int("iter", 2000)
-    iter.autoIterations = !arguments.has("fixed")
-    iter.blaLog2Eps = arguments.double("eps", -24)
-    iter.derivative = !arguments.has("noder")
-    iter.useBLA = !arguments.has("nobla")
-    return FractalScene(formula: formula, view: view, iter: iter)
+    var iteration = IterationSettings()
+    iteration.maxIter = arguments.int("iter", 2000)
+    iteration.autoIterations = !arguments.has("fixed")
+    iteration.blaLog2Eps = arguments.double("eps", -24)
+    iteration.derivative = !arguments.has("noder")
+    iteration.useBLA = !arguments.has("nobla")
+    return FractalScene(formula: formula, view: view, iteration: iteration)
 }
 
 /// --size WxH.
@@ -83,8 +83,8 @@ func render() throws {
     let (width, height) = imageSize()
     let calibrationStart = Date()
     engine.calibrate(scene: &scene, width: width, height: height)
-    print(String(format: "calibrated maxIter %d in %.3fs", scene.iter.maxIter, Date().timeIntervalSince(calibrationStart)))
-    scene.iter.autoIterations = false
+    print(String(format: "calibrated maxIter %d in %.3fs", scene.iteration.maxIter, Date().timeIntervalSince(calibrationStart)))
+    scene.iteration.autoIterations = false
     let start = Date()
     guard let image = engine.renderStill(scene: scene, color: makeColor(),
                                          options: .init(width: width, height: height, samples: arguments.int("samples", 4)))
@@ -100,7 +100,7 @@ func render() throws {
 /// Compares GPU escape iterations with a full-precision CPU iteration of every sample.
 func verify() {
     var scene = makeScene()
-    scene.iter.autoIterations = false
+    scene.iteration.autoIterations = false
     let (width, height) = (arguments.int("w", 48), arguments.int("h", 32))
     guard let map = engine.iterationMap(scene: scene, width: width, height: height) else { exit(1) }
     let maxIter = map.plan.effectiveMaxIter
@@ -108,8 +108,8 @@ func verify() {
     for y in 0..<height {
         for x in 0..<width {
             let point = Engine.samplePoint(scene: scene, width: width, height: height, x: x, y: y)
-            let cpu = Engine.oracle(formula: scene.formula, point: point, maxIter: maxIter, bailout: scene.iter.bailout).n
-            let n = map.n[y * width + x]
+            let cpu = Engine.oracle(formula: scene.formula, point: point, maxIter: maxIter, bailout: scene.iteration.bailout).n
+            let n = map.iterations[y * width + x]
             let gpu = n == FS_INTERIOR ? maxIter : Int(n)
             let difference = abs(gpu - cpu)
             if difference > 2 && off < arguments.int("dump", 0) {
@@ -127,10 +127,10 @@ func verify() {
         }
     }
     let total = Double(width * height)
-    let escaped = map.n.filter { $0 != FS_INTERIOR }
+    let escaped = map.iterations.filter { $0 != FS_INTERIOR }
     print("escaped \(escaped.count)/\(width * height) range \(escaped.min() ?? 0)...\(escaped.max() ?? 0)", terminator: "  ")
     print(String(format: "perturbed=%@ deep=%@ bla=%@ maxIter=%d  exact %.1f%%  within2 %.1f%%  off %.1f%% (interior mismatch %d, worst %d)",
-                 "\(map.plan.perturbed)", "\(map.plan.deep)", "\(map.plan.usedBLA)", maxIter,
+                 "\(map.plan.perturbed)", "\(map.plan.deep)", "\(map.plan.usesBLA)", maxIter,
                  100 * Double(exact) / total, 100 * Double(close) / total, 100 * Double(off) / total,
                  interiorMismatch, worst))
 }
@@ -141,7 +141,7 @@ func bench() {
     engine.calibrate(scene: &scene, width: width, height: height)
     let ms = engine.benchmarkPass(scene: scene, width: width, height: height, runs: arguments.int("runs", 5),
                                   warmup: arguments.double("warmup", 2), interior: !arguments.has("nointerior"))
-    print(String(format: "%dx%d maxIter %d: best %.2f ms GPU", width, height, scene.iter.maxIter, ms))
+    print(String(format: "%dx%d maxIter %d: best %.2f ms GPU", width, height, scene.iteration.maxIter, ms))
 }
 
 /// Follows the boundary: repeatedly re-centres on a high-iteration escaped sample and zooms in.
@@ -154,13 +154,15 @@ func dive() {
         seed = seed &* 6364136223846793005 &+ 1442695040888963407
         return Double(seed >> 11) / Double(1 << 53)
     }
-    let n = 64
+    let gridSide = 64
     while scene.view.zoomLog10 < target {
-        engine.calibrate(scene: &scene, width: n, height: n)
-        guard let map = engine.iterationMap(scene: scene, width: n, height: n) else { break }
+        engine.calibrate(scene: &scene, width: gridSide, height: gridSide)
+        guard let map = engine.iterationMap(scene: scene, width: gridSide, height: gridSide) else { break }
         var candidates: [(x: Int, y: Int, iterations: UInt32)] = []
-        for y in 8..<(n - 8) {
-            for x in 8..<(n - 8) where map.n[y * n + x] != FS_INTERIOR { candidates.append((x, y, map.n[y * n + x])) }
+        for y in 8..<(gridSide - 8) {
+            for x in 8..<(gridSide - 8) where map.iterations[y * gridSide + x] != FS_INTERIOR {
+                candidates.append((x, y, map.iterations[y * gridSide + x]))
+            }
         }
         if candidates.isEmpty {
             print("no escaped samples; stopping")
@@ -168,11 +170,11 @@ func dive() {
         }
         candidates.sort { $0.iterations > $1.iterations }
         let pick = candidates[Int(random() * Double(max(1, candidates.count / 20)))]
-        let point = Engine.samplePoint(scene: scene, width: n, height: n, x: pick.x, y: pick.y)
-        let log2Radius = scene.view.log2Radius - stepLog10 / log10(2.0)
+        let point = Engine.samplePoint(scene: scene, width: gridSide, height: gridSide, x: pick.x, y: pick.y)
+        let log2Radius = scene.view.log2Radius - stepLog10 / log10(2.0)   // stepLog10 decades deeper
         scene.view.center = point.withPrecision(max(64, Int(1 - log2Radius) + 96))
         scene.view.log2Radius = log2Radius
-        print(String(format: "zoom 1e%.1f  maxIter %d  iter %d", scene.view.zoomLog10, scene.iter.maxIter, pick.iterations))
+        print(String(format: "zoom 1e%.1f  maxIter %d  iter %d", scene.view.zoomLog10, scene.iteration.maxIter, pick.iterations))
     }
     let digits = Int(scene.view.zoomLog10) + 12
     print("--re \(scene.view.center.re.string(digits: digits)) --im \(scene.view.center.im.string(digits: digits)) --zoom \(scene.view.zoomLog10)")
@@ -182,22 +184,12 @@ func dive() {
 func stats() {
     let scene = makeScene()
     let (width, height) = (arguments.int("w", 64), arguments.int("h", 40))
-    guard let commandBuffer = engine.queue.makeCommandBuffer(),
-          let encoder = commandBuffer.makeComputeCommandEncoder() else { exit(1) }
-    let slot = engine.nextStatsSlot()
-    guard let plan = engine.makePlan(scene: scene, grid: .init(width: width, height: height), encoder: encoder,
-                                     blocking: true, statsSlot: slot) else { exit(1) }
-    engine.encodeStatsReset(encoder, slot: slot)
-    engine.encodeIterate(encoder, plan: plan, into: engine.makeGBuffer(samples: width * height), origin: .zero,
-                         size: SIMD2(UInt32(width), UInt32(height)), bufferOrigin: .zero, bufferStride: UInt32(width))
-    encoder.endEncoding()
-    commandBuffer.commit()
-    commandBuffer.waitUntilCompleted()
-    let s = engine.readStats(slot)
+    guard let pass = engine.runPass(scene: scene, width: width, height: height,
+                                    into: engine.makeGBuffer(samples: width * height)) else { exit(1) }
+    let s = engine.readStats(pass.slot)
     print(String(format: "maxIter %d (eff %d): escaped %u late %u unresolved %u interior %u  escape range %u...%u  gpu %.1f ms  mean iterations %.0f",
-                 scene.iter.maxIter, plan.effectiveMaxIter, s.escaped, s.lateEscaped, s.unresolved, s.interior,
-                 s.minIter, s.maxIter, (commandBuffer.gpuEndTime - commandBuffer.gpuStartTime) * 1000,
-                 Double(s.iterations) / Double(width * height)))
+                 scene.iteration.maxIter, pass.plan.effectiveMaxIter, s.escaped, s.lateEscaped, s.unresolved, s.interior,
+                 s.lowestEscape, s.highestEscape, pass.gpuMs, Double(s.iterations) / Double(width * height)))
 }
 
 func video() throws {
@@ -247,7 +239,7 @@ func extractFrames() {
 /// Side-by-side iteration images: GPU (left) and full-precision CPU (right), log-scaled greyscale.
 func compare() throws {
     var scene = makeScene()
-    scene.iter.autoIterations = false
+    scene.iteration.autoIterations = false
     let (width, height) = (arguments.int("w", 160), arguments.int("h", 100))
     guard let map = engine.iterationMap(scene: scene, width: width, height: height) else { exit(1) }
     let maxIter = Double(map.plan.effectiveMaxIter)
@@ -256,7 +248,7 @@ func compare() throws {
         for x in 0..<width {
             let point = Engine.samplePoint(scene: scene, width: width, height: height, x: x, y: y)
             cpu[y * width + x] = Engine.oracle(formula: scene.formula, point: point, maxIter: map.plan.effectiveMaxIter,
-                                               bailout: scene.iter.bailout).n
+                                               bailout: scene.iteration.bailout).n
         }
     }
     var pixels = [UInt8](repeating: 255, count: width * 2 * height * 4)
@@ -269,7 +261,7 @@ func compare() throws {
     }
     for y in 0..<height {
         for x in 0..<width {
-            let n = map.n[y * width + x]
+            let n = map.iterations[y * width + x]
             put(x, y, n == FS_INTERIOR ? maxIter : Double(n))
             put(x + width, y, Double(cpu[y * width + x]))
         }
@@ -284,27 +276,20 @@ func compare() throws {
 func minibrot() {
     let view = makeScene().view
     let start = Date()
-    let period = Minibrot.period(center: view.center, log2Radius: view.log2Radius,
-                                 maxPeriod: arguments.int("maxperiod", 2_000_000))
-    guard period > 0 else {
-        print("no period found")
+    guard let found = Minibrot.locate(near: view.center, searchLog2Radius: view.log2Radius, viewLog2Radius: view.log2Radius,
+                                      maxPeriod: arguments.int("maxperiod", 2_000_000)) else {
+        print("no minibrot found")
         exit(1)
     }
-    let precision = max(view.center.precision, Int(-view.log2Radius) * 2 + 128)
-    guard let nucleus = Minibrot.nucleus(near: view.center, period: period, precision: precision) else {
-        print("newton failed")
-        exit(1)
-    }
-    let (log2Size, angle, cardioid) = Minibrot.size(nucleus: nucleus, period: period)
-    let log2Distance = nucleus.minus(view.center).log2Abs - view.log2Radius
-    let log10Of2 = log10(2.0)
-    let digits = Int(-log2Size * log10Of2) + 12
-    print(String(format: "period %d %@, size 2^%.1f (1e%.1f), angle %.1f°, offset %.2f radii, %.2fs", period,
-                 cardioid ? "cardioid" : "disc", log2Size, log2Size * log10Of2, angle * 180 / .pi, exp2(log2Distance),
-                 Date().timeIntervalSince(start)))
-    print("--re \(nucleus.re.string(digits: digits)) --im \(nucleus.im.string(digits: digits))")
-    print(String(format: "minibrot view --zoom %.2f ; embedded julia --zoom %.2f", (1 - (log2Size + log2(3.0))) * log10Of2,
-                 (1 - (log2Size + view.log2Radius) / 2) * log10Of2))
+    let log2Distance = found.nucleus.minus(view.center).log2Abs - view.log2Radius
+    let digits = Int(-found.log2Size * log10(2.0)) + 12
+    print(String(format: "period %d %@, size 2^%.1f (1e%.1f), angle %.1f°, offset %.2f radii, %.2fs", found.period,
+                 found.cardioid ? "cardioid" : "disc", found.log2Size, found.log2Size * log10(2.0),
+                 found.angle * 180 / .pi, exp2(log2Distance), Date().timeIntervalSince(start)))
+    print("--re \(found.nucleus.re.string(digits: digits)) --im \(found.nucleus.im.string(digits: digits))")
+    print(String(format: "minibrot view --zoom %.2f ; embedded julia --zoom %.2f",
+                 Viewport.zoomLog10(log2Radius: found.log2Size + log2(3.0)),
+                 Viewport.zoomLog10(log2Radius: (found.log2Size + view.log2Radius) / 2)))
 }
 
 /// Samples a flight from the overview to the view, checking that both ends stay exact.

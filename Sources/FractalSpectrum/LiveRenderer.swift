@@ -5,10 +5,10 @@ import FractalKit
 import CFractal
 
 /// Drives the interactive view. Compute passes (a budgeted preview while the camera moves, then
-/// full-resolution tiles and anti-aliasing samples while it rests) run one at a time on the main
-/// queue and publish finished images into a front buffer. Presentation runs on its own queue every
-/// display frame and reprojects the latest finished image to the current camera, so motion stays at
-/// display rate however long the GPU needs for a pass.
+/// full-resolution tiles and anti-aliasing samples while it rests) are encoded on the main thread and
+/// run one at a time on the engine's command queue, publishing finished images into a front buffer.
+/// Presentation uses a command queue of its own every display frame and reprojects the latest finished
+/// image to the current camera, so motion stays at display rate however long the GPU needs for a pass.
 final class LiveRenderer: NSObject, MTKViewDelegate {
     let engine: Engine
     let camera: Camera
@@ -18,11 +18,12 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     // MARK: Inputs (main thread)
 
     var formula = Formula() { didSet { if formula != oldValue { sceneVersion += 1 } } }
-    var iter = IterationSettings() { didSet { if iter != oldValue { sceneVersion += 1 } } }
+    var iteration = IterationSettings() { didSet { if iteration != oldValue { sceneVersion += 1 } } }
     var color = ColorSettings() { didSet { if color != oldValue { colorVersion += 1 } } }
     /// Anti-aliasing samples accumulated while the view rests.
     var samplesPerPixel = 16 { didSet { if samplesPerPixel != oldValue { colorVersion += 1 } } }
-    /// GPU time a pass may take while the camera moves, in milliseconds.
+    /// GPU time one compute pass may take (previews and refinement tiles alike), in milliseconds; set
+    /// from the display's refresh rate by FractalMTKView.
     var frameBudgetMs = 7.0
     var paletteBlend: Engine.PaletteBlend?
     /// EDR headroom when HDR output is on (nil: standard range).
@@ -54,6 +55,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         case preparing = "Preparing", refining = "Refining", smoothing = "Smoothing", done = "Done"
     }
 
+    /// What the HUD shows about rendering, reported about ten times a second.
     struct Status {
         var fps: Double
         var gpuMs: Double
@@ -73,7 +75,8 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         var width: Int
         var height: Int
         var view: Viewport
-        var drawable: SIMD2<Int>
+        /// The drawable the probe's preview was made for, in pixels.
+        var drawableSize: SIMD2<Int>
         var iterations: [UInt32]
     }
 
@@ -189,6 +192,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
 
     // MARK: Compute passes
 
+    /// The kind of compute pass `submitCompute` encodes next.
     private enum Work { case preview, refine, recolor }
 
     /// Encodes and commits the next compute pass, if there is work to do. Iteration and colouring go
@@ -246,9 +250,9 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
 
         let totalSamples = size.x * size.y
         // within the scale hysteresis of the smallest preview
-        let smallest = work == .preview && previewScale < LiveRenderer.smallestPreview * 1.13
+        let isSmallestPreview = work == .preview && previewScale < LiveRenderer.smallestPreviewScale * 1.13
         let submitTime = CACurrentMediaTime()
-        let note = "\(work) scale \(String(format: "%.2f", previewScale)) iter \(iter.maxIter)"
+        let note = "\(work) scale \(String(format: "%.2f", previewScale)) iter \(iteration.maxIter)"
         iterationCommandBuffer.addCompletedHandler { [weak self] completed in
             let ms = (completed.gpuEndTime - completed.gpuStartTime) * 1000
             DispatchQueue.main.async { [weak self] in
@@ -261,18 +265,19 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
                 // interior: detected cycles, or samples stuck at the limit
                 interiorLikely = Double(stats.interior + stats.unresolved) > Double(iteratedSamples) * 0.002
                 if ms > 0.5 { iterationRate = iterationRate * 0.7 + Double(stats.iterations) / (ms / 1000) * 0.3 }
-                if sceneAtEncode == sceneVersion { tuneIterations(stats: stats, samples: iteratedSamples, ms: ms, smallest: smallest) }
+                if sceneAtEncode == sceneVersion { tuneIterations(stats: stats, samples: iteratedSamples, ms: ms, isSmallestPreview: isSmallestPreview) }
             }
         }
-        let drawable = size
+        let surfaceSize = size
         let generation = surfaceGeneration
         colorCommandBuffer.addCompletedHandler { [weak self] _ in
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 if let probe, let buffer = probeBuffer, generation == surfaceGeneration {
                     let words = buffer.contents().assumingMemoryBound(to: UInt32.self)
-                    let iterations = (0..<(probe.width * probe.height)).map { words[$0 * 4] }
-                    onProbe?(Probe(width: probe.width, height: probe.height, view: probe.view, drawable: drawable,
+                    let wordsPerSample = Engine.gBufferSampleStride / 4
+                    let iterations = (0..<(probe.width * probe.height)).map { words[$0 * wordsPerSample] }
+                    onProbe?(Probe(width: probe.width, height: probe.height, view: probe.view, drawableSize: surfaceSize,
                                    iterations: iterations))
                 }
                 computeInFlight = false
@@ -289,16 +294,16 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     }
 
     /// Smallest preview scale (fraction of the drawable per axis).
-    static let smallestPreview = 0.12
+    static let smallestPreviewScale = 0.12
 
-    private func scene(_ view: Viewport) -> FractalScene { FractalScene(formula: formula, view: view, iter: iter) }
+    private func scene(_ view: Viewport) -> FractalScene { FractalScene(formula: formula, view: view, iteration: iteration) }
 
     /// Renders the whole view at a resolution that fits the frame budget.
     private func encodePreview(iterating iterationEncoder: MTLComputeCommandEncoder,
                                coloring colorEncoder: MTLComputeCommandEncoder, view: Viewport,
                                moving: Bool) -> (samples: Int, slot: UInt32?) {
         let affordableSamples = max(frameBudgetMs - tailMs, 0.5) / max(msPerMegasample, 1e-6) * 1e6
-        let scale = min(1, max(LiveRenderer.smallestPreview, sqrt(affordableSamples / Double(size.x * size.y))))
+        let scale = min(1, max(LiveRenderer.smallestPreviewScale, sqrt(affordableSamples / Double(size.x * size.y))))
         // hysteresis, so that the preview does not flicker between sizes
         if abs(scale - previewScale) / previewScale > 0.12 || scale == 1 { previewScale = scale }
         if !moving && previewScale > 0.7 { previewScale = 1 }
@@ -439,7 +444,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         guard let view = passView else { return nil }
         let isPreview = previewSize.x > 0
         let (width, height) = isPreview ? (previewSize.x, previewSize.y) : (size.x, size.y)
-        let bytes = width * height * 16
+        let bytes = width * height * Engine.gBufferSampleStride
         if (probeBuffer?.length ?? 0) < bytes {
             probeBuffer = gpu.device.makeBuffer(length: bytes, options: .storageModeShared)
         }
@@ -466,7 +471,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         previewImage = engine.makeColorTexture(width: newSize.x, height: newSize.y)
         stage = .preparing
         needsPreview = true
-        tiles = LiveRenderer.spiralTiles(width: newSize.x, height: newSize.y, tile: tileSize)
+        tiles = LiveRenderer.tilesFromCenter(width: newSize.x, height: newSize.y, tileSize: tileSize)
         tileDone = gpu.device.makeBuffer(length: max(tiles.count, 1) * 4, options: .storageModeShared)
     }
 
@@ -477,14 +482,14 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     private func tileIndex(_ tile: SIMD2<Int>) -> Int { (tile.y / tileSize) * Int(tileGrid.x) + tile.x / tileSize }
 
     /// Tile origins ordered from the centre outwards.
-    static func spiralTiles(width: Int, height: Int, tile: Int) -> [SIMD2<Int>] {
+    static func tilesFromCenter(width: Int, height: Int, tileSize: Int) -> [SIMD2<Int>] {
         var origins: [SIMD2<Int>] = []
-        for y in stride(from: 0, to: height, by: tile) {
-            for x in stride(from: 0, to: width, by: tile) { origins.append(SIMD2(x, y)) }
+        for y in stride(from: 0, to: height, by: tileSize) {
+            for x in stride(from: 0, to: width, by: tileSize) { origins.append(SIMD2(x, y)) }
         }
-        let centre = SIMD2(Double(width), Double(height)) * 0.5
+        let center = SIMD2(Double(width), Double(height)) * 0.5
         func distance2(_ origin: SIMD2<Int>) -> Double {
-            let d = SIMD2(Double(origin.x + tile / 2), Double(origin.y + tile / 2)) - centre
+            let d = SIMD2(Double(origin.x + tileSize / 2), Double(origin.y + tileSize / 2)) - center
             return d.x * d.x + d.y * d.y
         }
         return origins.sorted { distance2($0) < distance2($1) }
@@ -589,27 +594,27 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     /// over two budgets lowers the limit. While the camera moves, increases are rate-limited:
     /// every pass sees a different view, and unthrottled doubling would multiply the cost of each
     /// next preview.
-    private func tuneIterations(stats: FSStats, samples: Int, ms: Double, smallest: Bool) {
-        guard iter.autoIterations else { return }
-        let smallestSamples = Double(size.x * size.y) * LiveRenderer.smallestPreview * LiveRenderer.smallestPreview
-        let smallestMs = smallest ? ms : min(ms, tailMs + ms * smallestSamples / Double(max(samples, 1)))
+    private func tuneIterations(stats: FSStats, samples: Int, ms: Double, isSmallestPreview: Bool) {
+        guard iteration.autoIterations else { return }
+        let smallestSamples = Double(size.x * size.y) * LiveRenderer.smallestPreviewScale * LiveRenderer.smallestPreviewScale
+        let smallestMs = isSmallestPreview ? ms : min(ms, tailMs + ms * smallestSamples / Double(max(samples, 1)))
         let frameMs = max(frameBudgetMs, 12)
-        let affordable = Double(iter.maxIter) * frameMs / max(smallestMs, 0.1)
-        affordableIterations = Int(min(affordable, Double(IterationTuner.ceiling)))
+        let affordable = Double(iteration.maxIter) * frameMs / max(smallestMs, 0.1)
+        affordableIterations = Int(min(affordable, Double(IterationTuner.highestLimit)))
         let moving = camera.isAnimating
-        var next = IterationTuner.adjust(maxIter: iter.maxIter, stats: stats, samples: samples)
+        var next = IterationTuner.adjust(maxIter: iteration.maxIter, stats: stats, samples: samples)
         var overBudget = false
-        if smallest && ms > 2 * frameMs {
-            next = min(next, iter.maxIter, max(IterationTuner.floor, Int(max(Double(iter.maxIter) / 16, affordable))))
-            overBudget = next < iter.maxIter
-        } else if next > iter.maxIter, Double(next) > affordable * (moving ? 1 : 2) {
+        if isSmallestPreview && ms > 2 * frameMs {
+            next = min(next, iteration.maxIter, max(IterationTuner.lowestLimit, Int(max(Double(iteration.maxIter) / 16, affordable))))
+            overBudget = next < iteration.maxIter
+        } else if next > iteration.maxIter, Double(next) > affordable * (moving ? 1 : 2) {
             // At rest the limit may rise up to what motion tolerates without a cut.
-            next = iter.maxIter
+            next = iteration.maxIter
         }
         let now = CACurrentMediaTime()
         // Passes encoded before a change are ignored (scene version), so an over-budget cut needs no delay.
-        let wait = overBudget ? 0 : next > iter.maxIter ? (moving ? 0.4 : 0.0) : 1.5
-        if next != iter.maxIter && now - lastIterationChange > wait {
+        let wait = overBudget ? 0 : next > iteration.maxIter ? (moving ? 0.4 : 0.0) : 1.5
+        if next != iteration.maxIter && now - lastIterationChange > wait {
             lastIterationChange = now
             onIterationProposal?(next)
         }
@@ -631,7 +636,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         case .preparing, .done: 1.0
         }
         onStatus(Status(fps: shownFps, gpuMs: lastGpuMs, stage: stage, progress: progress,
-                        maxIter: iter.maxIter, view: camera.view, perturbed: lastPlanPerturbed,
+                        maxIter: iteration.maxIter, view: camera.view, perturbed: lastPlanPerturbed,
                         referenceProgress: reference.computing ? reference.progress : nil, samples: accumulatedSamples,
                         iterationRate: iterationRate))
     }

@@ -69,10 +69,10 @@ extension Viewport {
 
     /// Same view with enough precision for its zoom level.
     public func normalizedPrecision() -> Viewport {
-        var v = self
-        let need = max(64, Int(-log2Radius) + 96)
-        if v.center.precision < need || v.center.precision > need + 256 { v.center = v.center.withPrecision(need) }
-        return v
+        var view = self
+        let needed = max(64, Int(-log2Radius) + 96)
+        if view.center.precision < needed || view.center.precision > needed + 256 { view.center = view.center.withPrecision(needed) }
+        return view
     }
 }
 
@@ -140,29 +140,29 @@ public struct Flight: @unchecked Sendable {
     public func view(at t: Double) -> Viewport {
         let e = smootherstep(min(max(t, 0), 1))
         let s = e * pathLength
-        var v = end
-        v.rotation = start.rotation + (end.rotation - start.rotation) * e
+        var view = end
+        view.rotation = start.rotation + (end.rotation - start.rotation) * e
         let precision = max(start.center.precision, end.center.precision)
         if pureZoom {
-            v.log2Radius = start.log2Radius + (end.log2Radius - start.log2Radius) * e
-            v.center = start.center.lerp(to: end.center, e, precision: precision)
-            return v
+            view.log2Radius = start.log2Radius + (end.log2Radius - start.log2Radius) * e
+            view.center = start.center.lerp(to: end.center, e, precision: precision)
+            return view
         }
         let lnW = lnW0 + Flight.lncosh(r0) - Flight.lncosh(rho * s + r0)
-        v.log2Radius = (lnW + lnDistance) / log(2.0)
+        view.log2Radius = (lnW + lnDistance) / log(2.0)
         // The centre's progress u along the displacement, measured from whichever end is nearer so
         // that it stays exact at both.
         let lnU = lnW0 + Flight.lnsinh(rho * s) - Flight.lncosh(rho * s + r0) - 2 * log(rho)
         let u = s <= 0 ? 0 : exp(lnU)
         if u < 0.5 {
-            v.center = start.center.offset(by: displacement * u, precision: precision)
+            view.center = start.center.offset(by: displacement * u, precision: precision)
         } else {
             let rest = pathLength - s
             let lnRemaining = lnW1 + Flight.lnsinh(rho * rest) - Flight.lncosh(rho * rest - r1) - 2 * log(rho)
             let remaining = rest <= 0 ? 0 : exp(lnRemaining)
-            v.center = end.center.offset(by: displacement * (-remaining), precision: precision)
+            view.center = end.center.offset(by: displacement * (-remaining), precision: precision)
         }
-        return v
+        return view
     }
 }
 
@@ -200,7 +200,6 @@ public final class Camera: @unchecked Sendable {
     }
 
     public var isFlying: Bool { flight != nil }
-    public var flightTarget: Viewport? { flight?.end }
     /// How far the current flight has come, from 0 to 1; nil when not flying.
     public var flightProgress: Double? { flight.map { min(flightTime / $0.duration, 1) } }
     public var isAnimating: Bool {
