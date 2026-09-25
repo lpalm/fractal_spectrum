@@ -43,6 +43,16 @@ struct ContentView: View {
             .allowsHitTesting(false)
             .animation(.spring(duration: 0.35), value: model.toast)
 
+            if let c = model.caption {
+                VStack {
+                    Spacer()
+                    CaptionCard(caption: c)
+                        .padding(.bottom, model.showUI ? 86 : 40)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+                .allowsHitTesting(false)
+            }
+
             if model.showHelp {
                 HelpOverlay(model: model)
                     .transition(.opacity.combined(with: .scale(scale: 0.97)))
@@ -53,6 +63,7 @@ struct ContentView: View {
         }
         .animation(.spring(duration: 0.4), value: model.showUI)
         .animation(.easeOut(duration: 0.2), value: model.showHelp)
+        .animation(.spring(duration: 0.6), value: model.caption)
         .preferredColorScheme(.dark)
         .onAppear {
             for f in FractalFamily.allCases {
@@ -516,6 +527,9 @@ struct TopControls: View {
                 control(model.autopilot ? "pause.fill" : "play.fill", model.autopilot ? "Stop autopilot (P)" : "Autopilot dive (P)") {
                     model.autopilot.toggle()
                 }
+                control(model.touring ? "stop.fill" : "sparkles", model.touring ? "Stop tour (T)" : "Guided tour (T)") {
+                    if model.touring { model.stopTour() } else { model.startTour() }
+                }
                 control("house.fill", "Home (H)") { model.goHome() }
                 control("questionmark", "Shortcuts") { model.showHelp.toggle() }
                 control("eye.slash", "Hide interface (Space)") { model.showUI = false }
@@ -535,6 +549,31 @@ struct TopControls: View {
     }
 }
 
+struct CaptionCard: View {
+    let caption: AppModel.Caption
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Text(caption.title)
+                .font(.system(size: 30, weight: .bold, design: .rounded))
+            Text(caption.subtitle)
+                .font(.system(size: 17, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+            if !caption.fact.isEmpty {
+                Text(caption.fact)
+                    .font(.system(size: 13, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 520)
+                    .padding(.top, 2)
+            }
+        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 18)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+    }
+}
+
 struct HelpOverlay: View {
     @Bindable var model: AppModel
 
@@ -550,6 +589,7 @@ struct HelpOverlay: View {
         ("[ / ]", "Halve / double iterations"),
         ("L", "Relief lighting"),
         ("P", "Autopilot dive"),
+        ("T", "Guided tour"),
         ("H", "Home"),
         ("F", "Full screen"),
         ("Space", "Hide interface"),

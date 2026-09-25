@@ -143,6 +143,9 @@ final class FractalMTKView: MTKView {
             case "l": model.toggleLighting()
             case "f": window?.toggleFullScreen(nil)
             case "p": model.autopilot.toggle()
+            case "t":
+                if model.touring { model.stopTour() } else { model.startTour() }
+                return
             default: super.keyDown(with: e)
             }
         }

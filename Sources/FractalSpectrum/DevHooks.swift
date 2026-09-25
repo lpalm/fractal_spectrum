@@ -33,6 +33,7 @@ final class DevHooks {
                 model.camera.jump(to: v)
             }
         case "home": model.goHome()
+        case "tour": if arg == "off" { model.stopTour() } else { model.startTour() }
         case "zoom": model.zoomStep(Double(arg) ?? -1)
         case "palette": model.setPalette(Int(arg) ?? 0)
         case "family": if let f = FractalFamily(rawValue: arg) { model.selectFamily(f) }
@@ -54,6 +55,10 @@ final class DevHooks {
                 model.renderer.recordFrames = false
                 let lines = model.renderer.frameLog.map { String(format: "%.4f,%.3f,%.3f", $0.t, $0.gpuMs, $0.scale) }
                 try? (["t,gpu_ms,scale"] + lines).joined(separator: "\n").write(toFile: arg, atomically: true, encoding: .utf8)
+                let slow = model.renderer.slowFrames.map { String(format: "%.4f,%.1f,%@", $0.t, $0.cpuMs, $0.note) }
+                try? slow.joined(separator: "\n").write(toFile: arg + ".slow", atomically: true, encoding: .utf8)
+                let passes = model.renderer.passLog.map { String(format: "%.4f,%.2f,%d,%@", $0.t, $0.ms, $0.samples, $0.note) }
+                try? passes.joined(separator: "\n").write(toFile: arg + ".passes", atomically: true, encoding: .utf8)
             }
         case "speed": model.autopilotSpeed = Double(arg) ?? model.autopilotSpeed
         case "export-image":

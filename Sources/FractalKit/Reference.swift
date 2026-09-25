@@ -224,8 +224,10 @@ final class BLATable {
     let log2Eps: Double
     let refCount: Int
 
+    /// Builds the table on the GPU. `reuse` donates its buffers when large enough; callers pass it only
+    /// when no submitted work can still be reading that table.
     init?(encodingInto enc: MTLComputeCommandEncoder, snapshot s: ReferenceOrbit.Snapshot, formula: Formula,
-          log2C: Double, log2Eps: Double) {
+          log2C: Double, log2Eps: Double, reuse old: BLATable? = nil) {
         let count0 = s.count - 2
         guard count0 >= 1 else { return nil }
         var offsets: [UInt32] = []
@@ -244,12 +246,19 @@ final class BLATable {
         self.log2C = log2C
         self.log2Eps = log2Eps
         refCount = s.count
-        // Fresh buffers each build: in-flight passes may still read the previous table.
         let device = GPU.shared.device
-        entries = device.makeBuffer(length: total * MemoryLayout<FSBLAEntry>.stride, options: .storageModePrivate)!
-        r2 = device.makeBuffer(length: total * 4, options: .storageModePrivate)!
-        logR = device.makeBuffer(length: total * 4, options: .storageModePrivate)!
-        minZ = device.makeBuffer(length: total * 4, options: .storageModePrivate)!
+        if let old, old.entries.length >= total * MemoryLayout<FSBLAEntry>.stride {
+            entries = old.entries
+            r2 = old.r2
+            logR = old.logR
+            minZ = old.minZ
+        } else {
+            let cap = total + total / 2
+            entries = device.makeBuffer(length: cap * MemoryLayout<FSBLAEntry>.stride, options: .storageModePrivate)!
+            r2 = device.makeBuffer(length: cap * 4, options: .storageModePrivate)!
+            logR = device.makeBuffer(length: cap * 4, options: .storageModePrivate)!
+            minZ = device.makeBuffer(length: cap * 4, options: .storageModePrivate)!
+        }
 
         let gpu = GPU.shared
         var key = GPU.PipelineKey(name: "bla_init")

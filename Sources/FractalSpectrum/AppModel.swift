@@ -37,6 +37,17 @@ final class AppModel {
     var cycleColors = false
     var cycleSpeed = 0.08
 
+    // Guided tour
+    var touring = false
+    var caption: Caption?
+    @ObservationIgnored private var tourTask: Task<Void, Never>?
+
+    struct Caption: Equatable {
+        var title: String
+        var subtitle: String
+        var fact: String
+    }
+
     // HUD
     var status: LiveRenderer.Status?
     var toast: String?
@@ -67,6 +78,40 @@ final class AppModel {
 
     func userInteracted() {
         if autopilot && camera.isFlying { autopilot = false }
+        if touring { stopTour() }
+    }
+
+    func startTour() {
+        stopTour()
+        autopilot = false
+        touring = true
+        tourTask = Task { @MainActor [weak self] in
+            let stops = Location.tourIDs.compactMap { id in Location.all.first { $0.id == id } }
+            for loc in stops {
+                guard let self, self.touring, !Task.isCancelled else { return }
+                self.caption = nil
+                self.fly(to: loc, announce: false)
+                try? await Task.sleep(for: .milliseconds(300))
+                while self.camera.isFlying && self.touring && !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                guard self.touring, !Task.isCancelled else { return }
+                self.caption = Caption(title: loc.name, subtitle: "Magnified " + ScaleFact.magnification(loc.zoom),
+                                       fact: ScaleFact.describe(zoomLog10: loc.zoom))
+                try? await Task.sleep(for: .seconds(loc.zoom > 50 ? 7 : 5))
+            }
+            guard let self, self.touring else { return }
+            self.caption = nil
+            self.touring = false
+            self.goHome()
+        }
+    }
+
+    func stopTour() {
+        touring = false
+        tourTask?.cancel()
+        tourTask = nil
+        caption = nil
     }
 
     func goHome() {
@@ -74,7 +119,7 @@ final class AppModel {
         camera.fly(to: Viewport.home(for: formula), duration: 1.4)
     }
 
-    func fly(to location: Location) {
+    func fly(to location: Location, announce: Bool = true) {
         autopilot = false
         if location.formula != formula {
             formula = location.formula
@@ -85,7 +130,7 @@ final class AppModel {
         guard let v = location.viewport else { return }
         renderer.snapColors = true
         camera.fly(to: v)
-        show("\(location.name)")
+        if announce { show("\(location.name) · " + ScaleFact.magnification(location.zoom)) }
     }
 
     func zoomStep(_ log2Factor: Double) {

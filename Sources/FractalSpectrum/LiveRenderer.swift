@@ -4,13 +4,16 @@ import QuartzCore
 import FractalKit
 import CFractal
 
-/// Drives the interactive view: a budgeted preview every frame while the camera moves, then
-/// time-sliced full-resolution tiles and anti-aliasing samples while it rests. The last finished
-/// image is always reprojected to the current camera, so motion never waits for the GPU.
+/// Drives the interactive view. Compute passes (a budgeted preview while the camera moves, then
+/// full-resolution tiles and anti-aliasing samples while it rests) run one at a time on the main
+/// queue and publish finished images into a front buffer. Presentation runs on its own queue every
+/// display frame and reprojects the latest finished image to the current camera, so motion stays at
+/// display rate however long the GPU needs for a pass.
 final class LiveRenderer: NSObject, MTKViewDelegate {
     let engine: Engine
     let camera: Camera
     private let gpu = GPU.shared
+    private let presentQueue: MTLCommandQueue
 
     // Inputs (main thread)
     var formula = Formula() { didSet { if formula != oldValue { sceneVersion += 1 } } }
@@ -52,12 +55,18 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     private var gFull: MTLBuffer?
     private var gAA: MTLBuffer?
     private var previewColor: MTLTexture?
-    private var acc: MTLTexture?
-    private var accView: Viewport?
+    /// Working image of the compute passes (sums anti-aliasing samples).
+    private var accum: MTLTexture?
+    /// Finished images: `display[front]` is shown, the other receives the next pass.
+    private var display: [MTLTexture] = []
+    private var front = 0
+    private var frontView: Viewport?
+    private var frontVersion = 0
+    private var presentedFrontVersion = -1
+    private var presentedCameraVersion = -1
     private var previewSize = SIMD2<Int>(0, 0)
-    private var previewView: Viewport?
 
-    // Progressive state
+    // Progressive state (compute side)
     private enum Stage: Equatable {
         case idle, full, aa, done
     }
@@ -77,6 +86,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     private var lastPreviewSlot: UInt32?
     private var statsSettled = true
     private var previewScale = 1.0
+    private var computeBusy = false
 
     // Timing
     private var costMsPerMSample = 20.0
@@ -88,11 +98,12 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     private var lastStatus = 0.0
     private var lastGpuMs = 0.0
     private var lastIterChange = 0.0
-    private let inFlight = DispatchSemaphore(value: 2)
+    private let presentInFlight = DispatchSemaphore(value: 2)
 
     init(engine: Engine, camera: Camera) {
         self.engine = engine
         self.camera = camera
+        presentQueue = GPU.shared.device.makeCommandQueue()!
         super.init()
     }
 
@@ -104,17 +115,21 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
 
     func invalidate() { needsPreview = true }
 
-    func resetFrameLog() { frameLog.removeAll() }
+    func resetFrameLog() {
+        frameLog.removeAll()
+        slowFrames.removeAll()
+        passLog.removeAll()
+    }
 
     /// Forces a recolour with the current settings (e.g. after a palette cross-fade ends).
     func recolor() { colorVersion += 1 }
 
     func draw(in view: MTKView) {
-        guard inFlight.wait(timeout: .now()) == .success else { return }
-        var signalled = false
-        defer { if !signalled { inFlight.signal() } }
-
         let now = CACurrentMediaTime()
+        defer {
+            let cpu = (CACurrentMediaTime() - now) * 1000
+            if recordFrames && cpu > 12 { slowFrames.append((now, cpu, lastWorkNote)) }
+        }
         let dt = min(now - lastTime, 0.05)
         lastTime = now
         onFrame?(dt)
@@ -125,13 +140,18 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
 
         camera.flipY = formula.family.flipY
         _ = camera.update(dt: dt, width: sz.x, height: sz.y)
+        if !computeBusy { submitCompute() }
+        present(in: view, now: now)
+        reportStatus(now: now)
+    }
+
+    /// Encodes and commits the next compute pass, if there is work to do.
+    private func submitCompute() {
         let moved = camera.version != renderedCameraVersion
         let sceneChanged = sceneVersion != renderedScene
         let colorChanged = colorVersion != renderedColor || paletteBlend != nil
-        let cur = camera.view
-
         enum Work { case preview, refine, recolor }
-        var work: Work
+        let work: Work
         if moved || sceneChanged || needsPreview {
             work = .preview
         } else if colorChanged {
@@ -139,28 +159,28 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         } else if stage == .full || stage == .aa {
             work = .refine
         } else {
-            reportStatus(now: now, drawn: false)
             return
         }
-
-        // Iteration work and colour/display work go into separate command buffers so the GPU time
-        // of the iteration alone drives the resolution budget.
+        lastWorkNote = "\(work)"
         guard let cbIter = gpu.queue.makeCommandBuffer(), let encIter = cbIter.makeComputeCommandEncoder(),
               let cbColor = gpu.queue.makeCommandBuffer(), let encColor = cbColor.makeComputeCommandEncoder() else { return }
         self.cbIter = cbIter
         var iteratedSamples = 0
         var statsSlot: UInt32?
         let sceneAtEncode = sceneVersion
+        var produced = true
 
         switch work {
         case .preview:
-            let r = encodePreview(iter: encIter, color: encColor, view: cur, moving: moved || camera.isAnimating)
+            let r = encodePreview(iter: encIter, color: encColor, view: camera.view, moving: moved || camera.isAnimating)
             iteratedSamples = r.samples
             statsSlot = r.slot
+            produced = r.samples > 0
         case .recolor:
             encodeRecolor(enc: encColor)
         case .refine:
             iteratedSamples = encodeRefine(iter: encIter, color: encColor)
+            produced = iteratedSamples > 0 || stage == .done
         }
         if let e = tileEncoder {
             e.endEncoding()
@@ -169,12 +189,25 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
             encIter.endEncoding()
         }
         self.cbIter = nil
+        encColor.endEncoding()
+
+        // Publish the working image into the back display buffer.
+        let back = 1 - front
+        let publishedView = targetView
+        if produced, let accum, display.count == 2, let blit = cbColor.makeBlitCommandEncoder() {
+            blit.copy(from: accum, to: display[back])
+            blit.endEncoding()
+        }
+
         let samples = iteratedSamples
-        let totalSamples = sz.x * sz.y
+        let totalSamples = size.x * size.y
+        let submitTime = CACurrentMediaTime()
+        let note = "\(work) scale \(String(format: "%.2f", previewScale)) iter \(iter.maxIter)"
         cbIter.addCompletedHandler { [weak self] cb in
             let ms = (cb.gpuEndTime - cb.gpuStartTime) * 1000
             DispatchQueue.main.async {
                 guard let self else { return }
+                if self.recordFrames { self.passLog.append((submitTime, ms, samples, note)) }
                 self.lastGpuMs = ms
                 self.learnCost(ms: ms, samples: samples, total: totalSamples)
                 if let slot = statsSlot, sceneAtEncode == self.sceneVersion {
@@ -182,41 +215,58 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
                 }
             }
         }
-        cbIter.commit()
-
-        // Work continues without a drawable (occluded window); only the present step is skipped.
-        let layer = view.layer as? CAMetalLayer
-        let visible = view.window?.occlusionState.contains(.visible) ?? false
-        if visible, let acc, let drawable = layer?.nextDrawable() {
-            let rep = accView.map { cur.reprojection(from: $0, width: sz.x, height: sz.y, flipY: camera.flipY) } ?? .identity
-            engine.encodePresent(encColor, acc: acc, dst: drawable.texture, reprojection: rep,
-                                 srcSize: SIMD2(UInt32(sz.x), UInt32(sz.y)),
-                                 background: color.interior, size: SIMD2(UInt32(sz.x), UInt32(sz.y)))
-            encColor.endEncoding()
-            cbColor.present(drawable)
-        } else {
-            encColor.endEncoding()
-        }
-        signalled = true
         cbColor.addCompletedHandler { [weak self] _ in
-            DispatchQueue.main.async { self?.inFlight.signal() }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.computeBusy = false
+                if produced && self.display.count == 2 {
+                    self.front = back
+                    self.frontView = publishedView
+                    self.frontVersion += 1
+                }
+            }
         }
+        computeBusy = true
+        cbIter.commit()
         cbColor.commit()
+    }
+
+    /// Shows the latest finished image, reprojected to the current camera, when either changed.
+    private func present(in view: MTKView, now: Double) {
+        guard display.count == 2, let fv = frontView else { return }
+        guard camera.version != presentedCameraVersion || frontVersion != presentedFrontVersion else { return }
+        let visible = view.window?.occlusionState.contains(.visible) ?? false
+        guard visible, presentInFlight.wait(timeout: .now()) == .success else { return }
+        guard let layer = view.layer as? CAMetalLayer, let drawable = layer.nextDrawable(),
+              let cb = presentQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else {
+            presentInFlight.signal()
+            return
+        }
+        let rep = camera.view.reprojection(from: fv, width: size.x, height: size.y, flipY: camera.flipY)
+        let sz = SIMD2(UInt32(size.x), UInt32(size.y))
+        engine.encodePresent(enc, acc: display[front], dst: drawable.texture, reprojection: rep, srcSize: sz,
+                             background: color.interior, size: sz)
+        enc.endEncoding()
+        cb.present(drawable)
+        cb.addCompletedHandler { [weak self] _ in self?.presentInFlight.signal() }
+        cb.commit()
+        presentedCameraVersion = camera.version
+        presentedFrontVersion = frontVersion
         frameTimes.append(now)
-        reportStatus(now: now, drawn: true)
+        if recordFrames { frameLog.append((now, lastGpuMs, previewScale)) }
     }
 
     /// Renders what is currently on screen into an image (snapshots).
     func captureCanvas() -> CGImage? {
-        guard let acc, size.x > 0, size.y > 0 else { return nil }
+        guard display.count == 2, let fv = frontView, size.x > 0, size.y > 0 else { return nil }
         let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: size.x, height: size.y, mipmapped: false)
         d.usage = [.shaderWrite, .shaderRead]
         d.storageMode = .shared
         guard let tex = gpu.device.makeTexture(descriptor: d),
-              let cb = gpu.queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return nil }
-        let rep = accView.map { camera.view.reprojection(from: $0, width: size.x, height: size.y, flipY: camera.flipY) } ?? .identity
-        engine.encodePresent(enc, acc: acc, dst: tex, reprojection: rep, srcSize: SIMD2(UInt32(size.x), UInt32(size.y)),
-                             background: color.interior)
+              let cb = presentQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return nil }
+        let rep = camera.view.reprojection(from: fv, width: size.x, height: size.y, flipY: camera.flipY)
+        engine.encodePresent(enc, acc: display[front], dst: tex, reprojection: rep,
+                             srcSize: SIMD2(UInt32(size.x), UInt32(size.y)), background: color.interior)
         enc.endEncoding()
         cb.commit()
         cb.waitUntilCompleted()
@@ -232,7 +282,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     }
 
     /// True when the view is fully refined (for scripted snapshots).
-    var isSettled: Bool { stage == .done && !camera.isAnimating && !needsPreview }
+    var isSettled: Bool { stage == .done && !camera.isAnimating && !needsPreview && !computeBusy }
 
     // MARK: Passes
 
@@ -242,10 +292,11 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         gPreview = engine.makeGBuffer(samples: n)
         gFull = engine.makeGBuffer(samples: n)
         gAA = engine.makeGBuffer(samples: n)
-        acc = engine.makeAccumulator(width: sz.x, height: sz.y)
+        accum = engine.makeAccumulator(width: sz.x, height: sz.y)
+        display = [engine.makeAccumulator(width: sz.x, height: sz.y), engine.makeAccumulator(width: sz.x, height: sz.y)]
+        front = 0
+        frontView = nil
         previewColor = engine.makeColorTexture(width: sz.x, height: sz.y)
-        accView = nil
-        previewView = nil
         stage = .idle
         needsPreview = true
         tiles = LiveRenderer.spiralTiles(width: sz.x, height: sz.y, tile: tileSize)
@@ -268,8 +319,8 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         let slot = engine.nextStatsSlot()
         guard let plan = engine.makePlan(scene: scene(v), grid: Engine.Grid(width: pw, height: ph), enc: iter,
                                          blocking: false, focus: camera.focus(width: size.x, height: size.y),
-                                         statsSlot: slot),
-              let gPreview, let gFull, let acc, let previewColor else {
+                                         statsSlot: slot, exclusive: true),
+              let gPreview, let gFull, let accum, let previewColor else {
             needsPreview = true   // reference still computing: keep reprojecting the last image
             return (0, nil)
         }
@@ -288,15 +339,13 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         statsSettled = !moving
         let outSize = SIMD2(UInt32(size.x), UInt32(size.y))
         if full1 {
-            engine.encodeColorize(enc, acc: acc, primary: .init(buffer: gFull, size: outSize), fallback: nil,
+            engine.encodeColorize(enc, acc: accum, primary: .init(buffer: gFull, size: outSize), fallback: nil,
                                   color: color, blend: paletteBlend, accumulate: false, outSize: outSize)
         } else {
             engine.encodeShade(enc, source: .init(buffer: gPreview, size: gs), dst: previewColor, color: color, blend: paletteBlend)
-            engine.encodeUpsample(enc, src: previewColor, size: gs, acc: acc, outSize: outSize)
+            engine.encodeUpsample(enc, src: previewColor, size: gs, acc: accum, outSize: outSize)
         }
-        accView = v
         accSamples = 1
-        previewView = v
         previewSize = SIMD2(pw, ph)
         targetView = v
         renderedScene = sceneVersion
@@ -316,11 +365,11 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
 
     /// Continues the full-resolution pass or the next anti-aliasing sample within the frame budget.
     private func encodeRefine(iter: MTLComputeCommandEncoder, color enc: MTLComputeCommandEncoder) -> Int {
-        guard let v = targetView, let acc, let gFull, let gAA, let previewColor else { return 0 }
+        guard let v = targetView, let accum, let gFull, let gAA, let previewColor else { return 0 }
         let jitter = stage == .aa ? Engine.jitter(aaIndex) : .zero
         let slot = engine.nextStatsSlot()
         guard let plan = engine.makePlan(scene: scene(v), grid: Engine.Grid(width: size.x, height: size.y, jitter: jitter),
-                                         enc: iter, blocking: false, statsSlot: slot) else { return 0 }
+                                         enc: iter, blocking: false, statsSlot: slot, exclusive: true) else { return 0 }
         let target = stage == .aa ? gAA : gFull
         if !statsSettled, let slot = lastPreviewSlot {
             // motion ended: settle colours on the last preview's statistics
@@ -350,10 +399,9 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
             let complete = nextTile >= tiles.count
             let fb = Engine.TileFallback(preview: previewColor, previewSize: SIMD2(UInt32(previewSize.x), UInt32(previewSize.y)),
                                          done: tileDone!, grid: tileGrid, tileSize: UInt32(tileSize))
-            engine.encodeColorize(enc, acc: acc, primary: .init(buffer: gFull, size: outSize),
+            engine.encodeColorize(enc, acc: accum, primary: .init(buffer: gFull, size: outSize),
                                   fallback: complete ? nil : fb, color: color, blend: paletteBlend,
                                   accumulate: false, outSize: outSize)
-            accView = v
             accSamples = 1
             if complete {
                 stage = aaSamples > 1 ? .aa : .done
@@ -361,7 +409,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
                 nextTile = 0
             }
         } else if nextTile >= tiles.count {
-            engine.encodeColorize(enc, acc: acc, primary: .init(buffer: gAA, size: outSize), fallback: nil,
+            engine.encodeColorize(enc, acc: accum, primary: .init(buffer: gAA, size: outSize), fallback: nil,
                                   color: color, blend: paletteBlend, accumulate: true, outSize: outSize)
             accSamples += 1
             aaIndex += 1
@@ -373,11 +421,11 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
 
     /// Recolours the best finished G-buffer after a palette or shading change; anti-aliasing restarts.
     private func encodeRecolor(enc: MTLComputeCommandEncoder) {
-        guard let acc else { return }
+        guard let accum else { return }
         let outSize = SIMD2(UInt32(size.x), UInt32(size.y))
         let fullDone = stage == .aa || stage == .done
         if fullDone, let gFull {
-            engine.encodeColorize(enc, acc: acc, primary: .init(buffer: gFull, size: outSize), fallback: nil,
+            engine.encodeColorize(enc, acc: accum, primary: .init(buffer: gFull, size: outSize), fallback: nil,
                                   color: color, blend: paletteBlend, accumulate: false, outSize: outSize)
             accSamples = 1
             if aaSamples > 1 {
@@ -388,7 +436,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         } else if let gPreview, let previewColor, previewSize.x > 0 {
             let gs = SIMD2(UInt32(previewSize.x), UInt32(previewSize.y))
             engine.encodeShade(enc, source: .init(buffer: gPreview, size: gs), dst: previewColor, color: color, blend: paletteBlend)
-            engine.encodeUpsample(enc, src: previewColor, size: gs, acc: acc, outSize: outSize)
+            engine.encodeUpsample(enc, src: previewColor, size: gs, acc: accum, outSize: outSize)
         }
         renderedColor = colorVersion
     }
@@ -416,7 +464,7 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     // MARK: Feedback
 
     /// Frame cost model: ms = tail + samples * perSample. The tail is the serial latency of the
-    /// slowest samples (paid once per frame); large passes reveal the per-sample throughput.
+    /// slowest samples (paid once per pass); large passes reveal the per-sample throughput.
     private func learnCost(ms: Double, samples: Int, total: Int) {
         guard samples > 0 else { return }
         let n = Double(samples) / 1e6
@@ -429,27 +477,36 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         }
     }
 
+    /// Applies the tuner's proposal. While the camera moves, increases are rate-limited: every pass
+    /// sees a different view, and unthrottled doubling would multiply the cost of each next preview.
     private func consider(stats: FSStats, samples: Int) {
         guard iter.autoIterations else { return }
         let next = IterationTuner.adjust(maxIter: iter.maxIter, stats: stats, samples: samples)
         let now = CACurrentMediaTime()
-        if next > iter.maxIter || (next < iter.maxIter && now - lastIterChange > 1.5) {
+        let moving = camera.isAnimating
+        let wait = next > iter.maxIter ? (moving ? 0.4 : 0.0) : 1.5
+        if next != iter.maxIter && now - lastIterChange > wait {
             lastIterChange = now
             onIterationProposal?(next)
         }
     }
 
-    /// Frame rate over the last second of drawing; holds the last value while idle.
+    /// Frame rate over the last second of presenting; holds the last value while idle.
     private var shownFps = 0.0
     private(set) var frameLog: [(t: Double, gpuMs: Double, scale: Double)] = []
+    /// Draw calls whose CPU time exceeded 12 ms, with the kind of work submitted.
+    private(set) var slowFrames: [(t: Double, cpuMs: Double, note: String)] = []
+    /// Compute passes: submit time, GPU ms of the iteration, samples, description.
+    private(set) var passLog: [(t: Double, ms: Double, samples: Int, note: String)] = []
+    private var lastWorkNote = ""
     var recordFrames = false
 
-    private func reportStatus(now: Double, drawn: Bool) {
+    private func reportStatus(now: Double) {
         frameTimes = frameTimes.filter { now - $0 < 1 }
-        if drawn && frameTimes.count > 1, let first = frameTimes.first, now - first > 0.2 {
-            shownFps = Double(frameTimes.count - 1) / (now - first)
+        if frameTimes.count > 1, let first = frameTimes.first, let last = frameTimes.last, last - first > 0.2,
+           now - last < 0.05 {
+            shownFps = Double(frameTimes.count - 1) / (last - first)
         }
-        if recordFrames && drawn { frameLog.append((now, lastGpuMs, previewScale)) }
         guard now - lastStatus > 0.1, let onStatus else { return }
         lastStatus = now
         let ref = engine.references.status

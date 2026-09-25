@@ -684,7 +684,7 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
             Jz = scl(Jz, -k);
             jze += k;
             if (pendingRec) { jrec = jze; pendingRec = false; }
-            else if (jze - jrec < -16) { inside = true; break; }
+            else if (jze - jrec < -10) { inside = true; break; }
         }
     }
     if (escaped && n > maxIter) escaped = false;

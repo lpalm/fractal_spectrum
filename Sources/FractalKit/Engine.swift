@@ -69,8 +69,10 @@ public final class Engine: @unchecked Sendable {
 
     /// Prepares a pass; returns nil while a needed reference orbit is still being computed.
     /// Encodes BLA table construction into `enc` when the table must be (re)built.
+    /// When `exclusive` is true no earlier submitted pass can still read this engine's tables, so a
+    /// rebuild may reuse their buffers.
     public func makePlan(scene: FractalScene, grid: Grid, enc: MTLComputeCommandEncoder, blocking: Bool,
-                         focus: Focus? = nil, statsSlot: UInt32) -> Plan? {
+                         focus: Focus? = nil, statsSlot: UInt32, exclusive: Bool = false) -> Plan? {
         let f = scene.formula
         let v = scene.view
         let minSide = Double(min(grid.width, grid.height))
@@ -129,7 +131,8 @@ public final class Engine: @unchecked Sendable {
         if !scene.iter.useBLA {
         } else if table == nil || table!.refCount != snap.count || table!.log2Eps != eps
             || log2C > table!.log2C || log2C < table!.log2C - 4 {
-            table = BLATable(encodingInto: enc, snapshot: snap, formula: f, log2C: log2C + 1, log2Eps: eps)
+            table = BLATable(encodingInto: enc, snapshot: snap, formula: f, log2C: log2C + 1, log2Eps: eps,
+                             reuse: exclusive ? ref.bla : nil)
             ref.bla = table
         }
         if let t = table {
@@ -528,7 +531,7 @@ public enum IterationTuner {
         let unresolved = Double(s.unresolved) / n
         if s.escaped == 0 { return unresolved > 0.01 ? min(maxIter * 4, ceiling) : maxIter }
         let late = Double(s.lateEscaped) / n
-        if unresolved > 0.005 && late > 0.002 { return min(maxIter * 2, ceiling) }
+        if unresolved > 0.01 && late > 0.01 { return min(maxIter * 2, ceiling) }
         let hi = Int(s.maxIter)
         if hi < maxIter / 8 && unresolved < 0.0005 && maxIter > floor { return max(floor, hi * 3) }
         return maxIter
