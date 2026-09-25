@@ -48,6 +48,9 @@ struct ContentView: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.97)))
             }
         }
+        .sheet(isPresented: $model.showExport) {
+            ExportSheet(model: model, export: model.export)
+        }
         .animation(.spring(duration: 0.4), value: model.showUI)
         .animation(.easeOut(duration: 0.2), value: model.showHelp)
         .preferredColorScheme(.dark)
@@ -75,6 +78,7 @@ struct Sidebar: View {
                 LocationsSection(model: model, thumbs: thumbs)
                 ColorSection(model: model)
                 QualitySection(model: model)
+                ExportSection(model: model)
             }
             .padding(16)
         }
@@ -344,6 +348,38 @@ struct QualitySection: View {
                     .font(.system(size: 12, weight: .medium, design: .rounded))
                     .toggleStyle(.switch)
                     .controlSize(.mini)
+            }
+        }
+    }
+}
+
+struct ExportSection: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeader(title: "Export")
+            HStack(spacing: 8) {
+                Button {
+                    model.export.kind = .image
+                    model.showExport = true
+                } label: {
+                    Label("Image", systemImage: "photo").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.glass)
+                Button {
+                    model.export.kind = .video
+                    model.showExport = true
+                } label: {
+                    Label("Zoom Video", systemImage: "film").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.glass)
+            }
+            if model.export.running {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(model.export.status).font(.system(size: 11, weight: .medium, design: .rounded))
+                    ProgressView(value: model.export.progress).controlSize(.small)
+                }
             }
         }
     }

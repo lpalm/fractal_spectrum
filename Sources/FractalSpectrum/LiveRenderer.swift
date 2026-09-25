@@ -74,6 +74,8 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     private var renderedCameraVersion = -1
     private var renderedColor = -1
     private var lastPlanPerturbed = false
+    private var lastPreviewSlot: UInt32?
+    private var statsSettled = true
     private var previewScale = 1.0
 
     // Timing
@@ -279,8 +281,11 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         let gs = SIMD2(UInt32(pw), UInt32(ph))
         engine.encodeStatsReset(iter, slot: slot)
         engine.encodeIterate(iter, plan: plan, gbuf: target, origin: .zero, size: gs, bufOrigin: .zero, bufStride: UInt32(pw))
-        engine.encodeStatsSmooth(iter, slot: slot, alpha: snapColors ? 1 : 0.2)
+        // Ease colour statistics while moving (temporal stability); snap at rest or after jumps.
+        engine.encodeStatsSmooth(iter, slot: slot, alpha: snapColors || !moving ? 1 : 0.2)
         snapColors = false
+        lastPreviewSlot = slot
+        statsSettled = !moving
         let outSize = SIMD2(UInt32(size.x), UInt32(size.y))
         if full1 {
             engine.encodeColorize(enc, acc: acc, primary: .init(buffer: gFull, size: outSize), fallback: nil,
@@ -317,6 +322,11 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         guard let plan = engine.makePlan(scene: scene(v), grid: Engine.Grid(width: size.x, height: size.y, jitter: jitter),
                                          enc: iter, blocking: false, statsSlot: slot) else { return 0 }
         let target = stage == .aa ? gAA : gFull
+        if !statsSettled, let slot = lastPreviewSlot {
+            // motion ended: settle colours on the last preview's statistics
+            engine.encodeStatsSmooth(iter, slot: slot, alpha: 1)
+            statsSettled = true
+        }
         // Tiles write disjoint regions, so they run concurrently and share the slow-pixel tail.
         iter.endEncoding()
         guard let conc = cbIter?.makeComputeCommandEncoder(dispatchType: .concurrent) else { return 0 }

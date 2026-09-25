@@ -1,5 +1,28 @@
 import Foundation
+import AVFoundation
 import FractalKit
+
+func import_frames() {
+    let url = URL(fileURLWithPath: args.string("in", "zoom.mp4"))
+    let asset = AVURLAsset(url: url)
+    let gen = AVAssetImageGenerator(asset: asset)
+    gen.requestedTimeToleranceBefore = .zero
+    gen.requestedTimeToleranceAfter = .zero
+    let sem = DispatchSemaphore(value: 0)
+    Task {
+        let duration = (try? await asset.load(.duration)) ?? .zero
+        for (i, f) in args.string("at", "0,0.5,1").split(separator: ",").compactMap({ Double($0) }).enumerated() {
+            let t = CMTimeMultiplyByFloat64(duration, multiplier: min(f, 0.999))
+            if let img = try? await gen.image(at: t).image {
+                let out = URL(fileURLWithPath: args.string("out", "frame") + "_\(i).png")
+                try? Engine.writePNG(img, to: out)
+                print("wrote", out.path)
+            }
+        }
+        sem.signal()
+    }
+    sem.wait()
+}
 
 // Headless renderer: renders stills, verifies GPU results against the CPU oracle and benchmarks.
 
@@ -169,6 +192,31 @@ case "stats":
     let s = engine.readStats(slot)
     print(String(format: "maxIter %d (eff %d): escaped %u late %u unresolved %u interior %u  gpu %.1f ms", scene.iter.maxIter,
                  plan.effectiveMaxIter, s.escaped, s.lateEscaped, s.unresolved, s.interior, (cb.gpuEndTime - cb.gpuStartTime) * 1000))
+
+case "video":
+    let scene = makeScene()
+    let (w, h) = size()
+    var color = ColorSettings()
+    color.palette = args.int("palette", 0)
+    let job = Exporter.VideoJob(formula: scene.formula, target: scene.view, start: Viewport.home(for: scene.formula),
+                                color: color, colorStats: nil, width: w, height: h, fps: args.int("fps", 30),
+                                duration: args.double("duration", 10), samples: args.int("samples", 2),
+                                codec: args.values["prores"] != nil ? .prores : .hevc, spin: args.double("spin", 0))
+    let out = URL(fileURLWithPath: args.string("out", "zoom.mp4"))
+    let t0 = Date()
+    var last = 0.0
+    try Exporter().exportVideo(job, to: out) { p, _ in
+        if p - last >= 0.1 || p >= 1 {
+            last = p
+            print(String(format: "  %3.0f%%  %.1fs", p * 100, Date().timeIntervalSince(t0)))
+        }
+        return true
+    }
+    print(String(format: "video %d frames in %.1fs -> %@", job.frameCount, Date().timeIntervalSince(t0), out.path))
+
+case "frames":
+    // Extracts frames at the given fractions of a video as PNGs.
+    import_frames()
 
 case "flighttest":
     let a = Viewport.home(for: Formula())

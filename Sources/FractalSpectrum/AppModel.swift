@@ -30,6 +30,8 @@ final class AppModel {
     var quality = Quality.high { didSet { renderer.aaSamples = quality.samples } }
     var showUI = true
     var showHelp = false
+    var showExport = false
+    let export = ExportController()
     var autopilot = false { didSet { if autopilot { camera.cancelFlight() } } }
     var autopilotSpeed = 1.0     // zoom doublings per second
     var cycleColors = false

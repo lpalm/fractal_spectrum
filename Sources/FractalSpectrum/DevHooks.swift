@@ -29,6 +29,7 @@ final class DevHooks {
             if let l = Location.all.first(where: { $0.id == arg }), let v = l.viewport {
                 model.formula = l.formula
                 if let p = l.palette { model.color.palette = p }
+                model.renderer.snapColors = true
                 model.camera.jump(to: v)
             }
         case "home": model.goHome()
@@ -55,6 +56,19 @@ final class DevHooks {
                 try? (["t,gpu_ms,scale"] + lines).joined(separator: "\n").write(toFile: arg, atomically: true, encoding: .utf8)
             }
         case "speed": model.autopilotSpeed = Double(arg) ?? model.autopilotSpeed
+        case "export-image":
+            model.export.imageSize = ExportController.imageSizes[0]
+            model.export.imageSamples = 4
+            model.export.exportImage(model: model, to: URL(fileURLWithPath: arg))
+        case "export-video":
+            model.export.videoSize = ExportController.videoSizes[0]
+            model.export.fps = 30
+            model.export.duration = 6
+            model.export.videoSamples = 1
+            model.export.exportVideo(model: model, to: URL(fileURLWithPath: arg))
+        case "export-status":
+            let e = model.export
+            try? "running=\(e.running) progress=\(e.progress) status=\(e.status)".write(toFile: arg, atomically: true, encoding: .utf8)
         case "status":
             if let s = model.status {
                 let d = model.renderer.drawableSizeForPicking

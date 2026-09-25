@@ -196,6 +196,13 @@ public final class Engine: @unchecked Sendable {
         memset(smooth.contents(), 0, 16)
     }
 
+    /// Current colour normalisation (low iteration, span, -, valid).
+    public var colorStats: SIMD4<Float> { smooth.contents().assumingMemoryBound(to: SIMD4<Float>.self).pointee }
+
+    public func setColorStats(_ s: SIMD4<Float>) {
+        smooth.contents().assumingMemoryBound(to: SIMD4<Float>.self).pointee = s
+    }
+
     /// Source G-buffer for colouring.
     public struct GSource {
         public var buffer: MTLBuffer
@@ -383,17 +390,20 @@ extension Engine {
         public var height: Int
         public var samples: Int
         public var tile = 2048
+        /// Colour normalisation to reuse (e.g. from the live view); computed when nil.
+        public var colorStats: SIMD4<Float>?
 
-        public init(width: Int, height: Int, samples: Int, tile: Int = 2048) {
+        public init(width: Int, height: Int, samples: Int, tile: Int = 2048, colorStats: SIMD4<Float>? = nil) {
             self.width = width
             self.height = height
             self.samples = samples
             self.tile = tile
+            self.colorStats = colorStats
         }
     }
 
     /// Runs a low-resolution pass to set colour statistics and, if enabled, the iteration limit.
-    public func calibrate(scene: inout FractalScene, width: Int, height: Int) {
+    public func calibrate(scene: inout FractalScene, width: Int, height: Int, updateColors: Bool = true) {
         let scale = max(1, max(width, height) / 512)
         let gw = max(width / scale, 16), gh = max(height / scale, 16)
         let g = makeGBuffer(samples: gw * gh)
@@ -409,7 +419,7 @@ extension Engine {
             encodeStatsReset(enc, slot: slot)
             encodeIterate(enc, plan: plan, gbuf: g, origin: .zero, size: SIMD2(UInt32(gw), UInt32(gh)),
                           bufOrigin: .zero, bufStride: UInt32(gw))
-            encodeStatsSmooth(enc, slot: slot, alpha: 1)
+            if updateColors { encodeStatsSmooth(enc, slot: slot, alpha: 1) }
             enc.endEncoding()
             cb.commit()
             cb.waitUntilCompleted()
@@ -429,8 +439,13 @@ extension Engine {
     public func renderStill(scene inScene: FractalScene, color: ColorSettings, options o: StillOptions,
                             progress: ((Double) -> Bool)? = nil) -> CGImage? {
         var scene = inScene
-        resetSmoothing()
-        calibrate(scene: &scene, width: o.width, height: o.height)
+        if let cs = o.colorStats {
+            setColorStats(cs)
+            calibrate(scene: &scene, width: o.width, height: o.height, updateColors: false)
+        } else {
+            resetSmoothing()
+            calibrate(scene: &scene, width: o.width, height: o.height)
+        }
         let tile = min(o.tile, max(o.width, o.height))
         let g = makeGBuffer(samples: tile * tile)
         let acc = makeAccumulator(width: tile, height: tile)

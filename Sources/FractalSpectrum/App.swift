@@ -16,6 +16,18 @@ struct FractalSpectrumApp: App {
         .defaultSize(width: 1560, height: 980)
         .commands {
             CommandGroup(replacing: .newItem) {}
+            CommandGroup(replacing: .saveItem) {
+                Button("Export Image…") {
+                    model.export.kind = .image
+                    model.showExport = true
+                }
+                .keyboardShortcut("s", modifiers: .command)
+                Button("Export Zoom Video…") {
+                    model.export.kind = .video
+                    model.showExport = true
+                }
+                .keyboardShortcut("e", modifiers: .command)
+            }
             CommandMenu("Navigate") {
                 Button("Home") { model.goHome() }.keyboardShortcut("h", modifiers: [])
                 Button("Zoom In") { model.zoomStep(-1) }.keyboardShortcut("=", modifiers: .command)
