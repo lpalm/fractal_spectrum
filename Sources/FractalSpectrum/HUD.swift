@@ -15,7 +15,8 @@ struct HUDBar: View {
             // measured only while the view moves
             readout("speedometer", status.map { $0.fps > 0 ? "\(Int($0.fps.rounded()))" : "—" } ?? "—", "fps")
             divider
-            readout("bolt.fill", rateText(status?.iterationRate ?? 0), "effective iter / s")
+            let rate = rateReadout(status?.iterationRate ?? 0)
+            readout("bolt.fill", rate.value, rate.unit)
             divider
             HStack(spacing: 7) {
                 ProgressRing(progress: status?.progress ?? 0, active: status?.stage != .done)
@@ -69,13 +70,14 @@ struct HUDBar: View {
         Rectangle().fill(Color.white.opacity(0.14)).frame(width: 1, height: 16)
     }
 
-    private func rateText(_ rate: Double) -> String {
+    /// Iterations per second as a number and its unit in words ("7.3", "billion iter / s").
+    private func rateReadout(_ rate: Double) -> (value: String, unit: String) {
         switch rate {
-        case 1e15...: String(format: "%.1f P", rate / 1e15)
-        case 1e12...: String(format: "%.1f T", rate / 1e12)
-        case 1e9...: String(format: "%.1f G", rate / 1e9)
-        case 1e6...: String(format: "%.0f M", rate / 1e6)
-        default: "—"
+        case 1e15...: (String(format: "%.1f", rate / 1e15), "quadrillion iter / s")
+        case 1e12...: (String(format: "%.1f", rate / 1e12), "trillion iter / s")
+        case 1e9...: (String(format: "%.1f", rate / 1e9), "billion iter / s")
+        case 1e6...: (String(format: "%.0f", rate / 1e6), "million iter / s")
+        default: ("—", "iter / s")
         }
     }
 
