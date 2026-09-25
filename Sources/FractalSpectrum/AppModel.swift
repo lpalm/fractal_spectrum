@@ -15,6 +15,17 @@ enum Quality: String, CaseIterable, Identifiable {
         case .ultra: return 64
         }
     }
+
+    /// Relative error tolerated by the bilinear approximation (log2); looser is faster and the
+    /// difference is invisible except in chaotic dust.
+    var blaLog2Eps: Double {
+        switch self {
+        case .fast: return -10
+        case .balanced: return -14
+        case .high: return -16
+        case .ultra: return -24
+        }
+    }
 }
 
 /// App-wide state shared by the SwiftUI chrome and the Metal renderer.
@@ -27,7 +38,12 @@ final class AppModel {
     var formula = Formula() { didSet { formulaChanged(from: oldValue) } }
     var color = ColorSettings() { didSet { renderer.color = color } }
     var iter = IterationSettings() { didSet { renderer.iter = iter } }
-    var quality = Quality.high { didSet { renderer.aaSamples = quality.samples } }
+    var quality = Quality.high {
+        didSet {
+            renderer.aaSamples = quality.samples
+            iter.blaLog2Eps = quality.blaLog2Eps
+        }
+    }
     var showUI = true
     var showHelp = false
     var showExport = false
@@ -61,6 +77,7 @@ final class AppModel {
         camera = Camera(view: Viewport.home(for: f))
         renderer = LiveRenderer(engine: engine, camera: camera)
         renderer.formula = f
+        iter.blaLog2Eps = quality.blaLog2Eps
         renderer.iter = iter
         renderer.color = color
         renderer.aaSamples = quality.samples
@@ -251,6 +268,7 @@ final class AppModel {
         if formula.family != old.family || formula.effectivePower != old.effectivePower || formula.julia != old.julia {
             engine.references.reset()
             iter.maxIter = IterationSettings().maxIter
+            iter.blaLog2Eps = quality.blaLog2Eps
         }
     }
 }
