@@ -31,7 +31,7 @@ swift build -c release --product fscli
 | Rotate gesture, Q / E | Rotate |
 | ⌥-click | Julia set of the clicked point |
 | T | Guided tour |
-| P | Autopilot: endless dive that steers towards intricate boundary detail (, / . for speed) |
+| P | Autopilot: endless dive along intricate boundary detail, stopping at minibrots on the way (, / . for speed) |
 | M | Find the nearest mini-Mandelbrot in view and fly to it |
 | B | Save the view to Your Places |
 | H | Home |

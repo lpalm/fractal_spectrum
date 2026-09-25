@@ -726,7 +726,7 @@ struct HelpOverlay: View {
         ("C / X", "Next / previous palette"),
         ("[ / ]", "Halve / double iterations"),
         ("L", "Relief lighting"),
-        ("P", "Autopilot dive (follows the most intricate detail)"),
+        ("P", "Autopilot dive (follows intricate detail, stops at minibrots)"),
         (", / .", "Autopilot slower / faster"),
         ("T", "Guided tour"),
         ("H", "Home"),
