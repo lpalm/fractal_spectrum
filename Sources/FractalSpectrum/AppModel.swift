@@ -101,6 +101,7 @@ final class AppModel {
         camera = Camera(view: Viewport.home(for: f))
         renderer = LiveRenderer(engine: engine, camera: camera)
         pilot = Autopilot(camera: camera, renderer: renderer)
+        pilot.onArrival = { [weak self] p, ls in self?.announceMinibrot(period: p, log2Size: ls) }
         renderer.formula = f
         iter.blaLog2Eps = quality.blaLog2Eps
         renderer.iter = iter
@@ -291,7 +292,7 @@ final class AppModel {
                 }
                 self.renderer.snapColors = true
                 self.camera.fly(to: target)
-                self.show("Mini-Mandelbrot of period \(p) · " + ScaleFact.magnification((1 - ls) * log10(2.0)))
+                self.announceMinibrot(period: p, log2Size: ls)
             }
         }
     }
@@ -305,6 +306,10 @@ final class AppModel {
         let (ls, _, cardioid) = Minibrot.size(nucleus: n, period: period)
         guard cardioid, ls.isFinite, ls < view.log2Radius, n.minus(view.center).log2Abs < view.log2Radius + 2 else { return nil }
         return (Viewport(center: n, log2Radius: ls + log2(2.6), rotation: view.rotation), period, ls)
+    }
+
+    func announceMinibrot(period: Int, log2Size: Double) {
+        show("Mini-Mandelbrot of period \(period.formatted()) · " + ScaleFact.magnification((1 - log2Size) * log10(2.0)), duration: 2.5)
     }
 
     func toggleJulia() {

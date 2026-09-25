@@ -10,6 +10,8 @@ import CFractal
 final class Autopilot {
     /// Zoom speed in doublings per second.
     var speed = 1.0
+    /// Called on reaching a minibrot with its period and log2 size.
+    var onArrival: ((Int, Double) -> Void)?
     private let camera: Camera
     private let renderer: LiveRenderer
     /// Boundary detail the dive heads for, from the last probe.
@@ -70,6 +72,7 @@ final class Autopilot {
         if let m = minibrot {
             camera.rotate(by: remainder(m.angle - camera.view.rotation, 2 * .pi) * min(1, dt * 0.8))
             if camera.view.log2Radius <= m.log2Size + log2(1.5) {
+                onArrival?(m.period, m.log2Size)
                 visitedPeriod = m.period
                 minibrot = nil
                 target = nil
