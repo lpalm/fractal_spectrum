@@ -36,6 +36,19 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     /// Called at the start of every display frame with the elapsed time.
     var onFrame: ((Double) -> Void)?
 
+    /// Coarse copy of the latest preview's escape iterations, for steering the autopilot.
+    struct Probe {
+        var width: Int
+        var height: Int
+        var view: Viewport
+        var drawable: SIMD2<Int>
+        var iterations: [UInt32]
+    }
+    /// Set to receive the next preview's iterations via `onProbe` (main thread).
+    var probeRequested = false
+    var onProbe: ((Probe) -> Void)?
+    private var probeBuffer: MTLBuffer?
+
     /// Current drawable size in pixels, for converting pointer positions.
     var drawableSizeForPicking: SIMD2<Int> { size.x > 0 ? size : SIMD2(1, 1) }
 
@@ -197,6 +210,23 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
         self.cbIter = nil
         encColor.endEncoding()
 
+        // Hand a copy of the preview's iterations to the autopilot when asked.
+        var probeInfo: (Int, Int, Viewport)?
+        if work == .preview, produced, probeRequested, let v = targetView, previewSize.x > 0 || stage != .full {
+            let pw = previewSize.x > 0 ? previewSize.x : size.x, ph = previewSize.x > 0 ? previewSize.y : size.y
+            let src = previewSize.x > 0 ? gPreview : gFull
+            let bytes = pw * ph * 16
+            if probeBuffer == nil || probeBuffer!.length < bytes {
+                probeBuffer = gpu.device.makeBuffer(length: bytes, options: .storageModeShared)
+            }
+            if let src, let dst = probeBuffer, let blit = cbColor.makeBlitCommandEncoder() {
+                blit.copy(from: src, sourceOffset: 0, to: dst, destinationOffset: 0, size: bytes)
+                blit.endEncoding()
+                probeInfo = (pw, ph, v)
+                probeRequested = false
+            }
+        }
+
         // Publish the working image into the back display buffer.
         let back = 1 - front
         let publishedView = targetView
@@ -223,9 +253,15 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
                 }
             }
         }
+        let drawable = size
         cbColor.addCompletedHandler { [weak self] _ in
             DispatchQueue.main.async {
                 guard let self else { return }
+                if let (pw, ph, v) = probeInfo, let buf = self.probeBuffer {
+                    let raw = buf.contents().assumingMemoryBound(to: UInt32.self)
+                    let its = (0..<(pw * ph)).map { raw[$0 * 4] }
+                    self.onProbe?(Probe(width: pw, height: ph, view: v, drawable: drawable, iterations: its))
+                }
                 self.computeBusy = false
                 if produced && self.display.count == 2 {
                     self.front = back
@@ -490,7 +526,10 @@ final class LiveRenderer: NSObject, MTKViewDelegate {
     /// sees a different view, and unthrottled doubling would multiply the cost of each next preview.
     private func consider(stats: FSStats, samples: Int) {
         guard iter.autoIterations else { return }
-        let next = IterationTuner.adjust(maxIter: iter.maxIter, stats: stats, samples: samples)
+        var next = IterationTuner.adjust(maxIter: iter.maxIter, stats: stats, samples: samples)
+        // Keep the view interactive: no automatic increase once a full frame would take ~0.6 s.
+        let fullFrameMs = tailMs + costMsPerMSample * Double(size.x * size.y) / 1e6
+        if next > iter.maxIter && fullFrameMs > 600 { next = iter.maxIter }
         let now = CACurrentMediaTime()
         let moving = camera.isAnimating
         let wait = next > iter.maxIter ? (moving ? 0.4 : 0.0) : 1.5

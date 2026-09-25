@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import Observation
 import FractalKit
+import CFractal
 
 /// Rendering quality presets: anti-aliasing samples accumulated while the view rests.
 enum Quality: String, CaseIterable, Identifiable {
@@ -48,7 +49,15 @@ final class AppModel {
     var showHelp = false
     var showExport = false
     let export = ExportController()
-    var autopilot = false { didSet { if autopilot { camera.cancelFlight() } } }
+    var autopilot = false {
+        didSet {
+            if autopilot { camera.cancelFlight() }
+            autopilotTarget = nil
+        }
+    }
+    /// Plane point the autopilot is diving towards (boundary detail found in the last probe).
+    @ObservationIgnored private var autopilotTarget: PlanePoint?
+    @ObservationIgnored private var lastProbe = 0.0
     var autopilotSpeed = 1.0     // zoom doublings per second
     var cycleColors = false
     /// Extended dynamic range output on HDR-capable displays.
@@ -99,6 +108,7 @@ final class AppModel {
             MainActor.assumeIsolated { self?.renderer.invalidate() }
         }
         renderer.onFrame = { [weak self] dt in MainActor.assumeIsolated { self?.tick(dt) } }
+        renderer.onProbe = { [weak self] p in MainActor.assumeIsolated { self?.steer(with: p) } }
         GPU.shared.prewarm()
         devHooks = DevHooks(model: self)
         loadBookmarks()
@@ -384,12 +394,85 @@ final class AppModel {
         if cycleColors {
             color.offset = (color.offset + dt * cycleSpeed).truncatingRemainder(dividingBy: 1)
         }
-        if autopilot {
-            let s = renderer.drawableSizeForPicking
-            let c = SIMD2(Double(s.x), Double(s.y)) * 0.5
-            camera.zoom(log2Factor: -autopilotSpeed * dt, at: c, width: s.x, height: s.y, animated: false)
-            if camera.view.log2Radius <= camera.minLog2Radius + 0.01 { autopilot = false }
+        if autopilot { autopilotStep(dt) }
+    }
+
+    // MARK: Autopilot
+
+    /// Zooms towards the current target while gliding it to the centre; asks for fresh probes.
+    private func autopilotStep(_ dt: Double) {
+        let s = renderer.drawableSizeForPicking
+        let c = SIMD2(Double(s.x), Double(s.y)) * 0.5
+        let now = CACurrentMediaTime()
+        if now - lastProbe > 0.3 {
+            lastProbe = now
+            renderer.probeRequested = true
         }
+        var anchor = c
+        if let t = autopilotTarget {
+            let p = camera.view.pixel(of: t, width: s.x, height: s.y, flipY: formula.family.flipY)
+            if p.x < 0 || p.y < 0 || p.x > Double(s.x) || p.y > Double(s.y) {
+                autopilotTarget = nil
+            } else {
+                anchor = p
+                camera.pan(pixels: (c - p) * min(1, dt * 0.9), width: s.x, height: s.y)
+            }
+        }
+        camera.zoom(log2Factor: -autopilotSpeed * dt, at: anchor, width: s.x, height: s.y, animated: false)
+        if camera.view.log2Radius <= camera.minLog2Radius + 0.01 { autopilot = false }
+    }
+
+    /// Picks the next target: rich boundary detail (upper escape iterations, not the extreme ones
+    /// hugging a minibrot) away from interiors, preferring the centre for a steady path.
+    private func steer(with probe: LiveRenderer.Probe) {
+        guard autopilot else { return }
+        let w = probe.width, h = probe.height
+        let step = max(1, min(w, h) / 64)
+        let gw = (w + step - 1) / step, gh = (h + step - 1) / step
+        var grid = [UInt32](repeating: 0, count: gw * gh)
+        var escaped: [UInt32] = []
+        var interior = 0
+        for gy in 0..<gh {
+            for gx in 0..<gw {
+                let n = probe.iterations[min(gy * step, h - 1) * w + min(gx * step, w - 1)]
+                grid[gy * gw + gx] = n
+                if n == FS_INTERIOR { interior += 1 } else { escaped.append(n) }
+            }
+        }
+        let s = renderer.drawableSizeForPicking
+        let centre = SIMD2(Double(s.x), Double(s.y)) * 0.5
+        guard escaped.count > gw * gh / 20, Double(interior) < Double(gw * gh) * 0.3 else {
+            // mostly interior or nothing to follow: back out and look again
+            autopilotTarget = nil
+            camera.zoom(log2Factor: 1.2, at: centre, width: s.x, height: s.y, animated: true)
+            return
+        }
+        escaped.sort()
+        let lo = Double(escaped[escaped.count * 60 / 100]), hi = Double(escaped[escaped.count * 97 / 100])
+        guard hi > lo else { return }
+        let r = max(2, gw / 12)
+        var best: (score: Double, x: Int, y: Int)?
+        let cx = Double(gw) / 2, cy = Double(gh) / 2, diag = hypot(cx, cy)
+        for gy in r..<(gh - r) {
+            for gx in r..<(gw - r) {
+                let n = Double(grid[gy * gw + gx])
+                guard grid[gy * gw + gx] != FS_INTERIOR, n >= lo, n <= hi else { continue }
+                var clear = true
+                outer: for dy in stride(from: -r, through: r, by: max(1, r / 2)) {
+                    for dx in stride(from: -r, through: r, by: max(1, r / 2)) where grid[(gy + dy) * gw + gx + dx] == FS_INTERIOR {
+                        clear = false
+                        break outer
+                    }
+                }
+                guard clear else { continue }
+                let score = (n - lo) / (hi - lo) - 0.9 * hypot(Double(gx) - cx, Double(gy) - cy) / diag
+                if best == nil || score > best!.score { best = (score, gx, gy) }
+            }
+        }
+        guard let b = best else { return }
+        let px = SIMD2(Double(b.x * step) + 0.5, Double(b.y * step) + 0.5) * Double(probe.drawable.x) / Double(w)
+        autopilotTarget = probe.view.point(atPixel: px, width: probe.drawable.x, height: probe.drawable.y,
+                                           flipY: formula.family.flipY)
     }
 
     private func formulaChanged(from old: Formula) {

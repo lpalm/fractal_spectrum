@@ -176,6 +176,14 @@ final class FractalMTKView: MTKView {
             case "l": model.toggleLighting()
             case "f": window?.toggleFullScreen(nil)
             case "p": model.autopilot.toggle()
+            case ",", "<":
+                model.autopilotSpeed = max(0.25, model.autopilotSpeed / 1.4)
+                model.show(String(format: "Autopilot speed %.1f×", model.autopilotSpeed))
+                return
+            case ".", ">":
+                model.autopilotSpeed = min(8, model.autopilotSpeed * 1.4)
+                model.show(String(format: "Autopilot speed %.1f×", model.autopilotSpeed))
+                return
             case "t":
                 if model.touring { model.stopTour() } else { model.startTour() }
                 return
