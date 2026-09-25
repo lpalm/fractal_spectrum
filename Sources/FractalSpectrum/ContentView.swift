@@ -777,20 +777,30 @@ struct HelpOverlay: View {
                 Button { model.showHelp = false } label: { Image(systemName: "xmark") }
                     .buttonStyle(.glass)
             }
-            Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 8) {
-                ForEach(rows, id: \.0) { r in
-                    GridRow {
-                        Text(r.0)
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        Text(r.1)
-                            .font(.system(size: 13, design: .rounded))
-                            .foregroundStyle(.secondary)
-                    }
-                }
+            // two columns, so the list fits the smallest window
+            HStack(alignment: .top, spacing: 32) {
+                column(rows.prefix((rows.count + 1) / 2))
+                column(rows.dropFirst((rows.count + 1) / 2))
             }
         }
         .padding(24)
-        .frame(width: 440)
+        .frame(width: 820)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+    }
+
+    private func column(_ part: ArraySlice<(String, String)>) -> some View {
+        Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
+            ForEach(part, id: \.0) { r in
+                GridRow {
+                    Text(r.0)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    Text(r.1)
+                        .font(.system(size: 13, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
