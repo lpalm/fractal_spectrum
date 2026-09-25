@@ -45,7 +45,6 @@ final class LiveRecorder: @unchecked Sendable {
         CVMetalTextureCacheCreate(nil, nil, GPU.shared.device, nil, &cache)
         guard let cache, writer.startWriting() else { throw writer.error ?? CocoaError(.fileWriteUnknown) }
         textureCache = cache
-        writer.startSession(atSourceTime: .zero)
     }
 
     /// A pixel buffer to draw the next frame into, with its texture; nil while the encoder is busy.
@@ -64,12 +63,14 @@ final class LiveRecorder: @unchecked Sendable {
         queue.async { [self] in
             let t = CMTime(seconds: time - start, preferredTimescale: 6000)
             guard t > last, input.isReadyForMoreMediaData else { return }
+            // the movie starts with its first frame (a session from 0 would open with black)
+            if last == .negativeInfinity { writer.startSession(atSourceTime: t) }
             if adaptor.append(buffer, withPresentationTime: t) { last = t }
         }
     }
 
     /// Ends the movie at the current time (holding the last frame) and reports whether it was written;
-    /// a movie without frames is removed.
+    /// a movie without frames (its session never started) is removed.
     func finish(completion: @escaping @Sendable (Bool) -> Void) {
         let end = CMTime(seconds: CACurrentMediaTime() - start, preferredTimescale: 6000)
         queue.async { [self] in
