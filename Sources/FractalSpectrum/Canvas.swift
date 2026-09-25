@@ -78,11 +78,12 @@ final class FractalMTKView: MTKView {
 
     override func flagsChanged(with e: NSEvent) {
         super.flagsChanged(with: e)
-        if !e.modifierFlags.contains(.option) { hoverSuppressed = false }
         updateHover(e.modifierFlags)
     }
 
     private func updateHover(_ flags: NSEvent.ModifierFlags) {
+        // ⌥ can be released while another app is active, without a flagsChanged here
+        if !flags.contains(.option) { hoverSuppressed = false }
         updateJuliaHover(option: flags.contains(.option))
         updateOrbit(shift: flags.contains(.shift) && !flags.contains(.command))
     }

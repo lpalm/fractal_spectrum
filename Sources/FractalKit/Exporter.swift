@@ -170,10 +170,8 @@ public final class Exporter: @unchecked Sendable {
             CVMetalTextureCacheCreateTextureFromImage(nil, cache, pixelBuffer, nil, .bgra8Unorm, job.width, job.height, 0, &cvTex)
             guard let cvTex, let texture = CVMetalTextureGetTexture(cvTex) else { throw CocoaError(.fileWriteUnknown) }
 
-            let started = ProcessInfo.processInfo.systemUptime
-            let stats = renderer.render(scene: scene, color: color, samples: job.samples, into: texture,
-                                        statsAlpha: f == 0 ? 1 : 0.35)
-            let ms = (ProcessInfo.processInfo.systemUptime - started) * 1000
+            let (stats, ms) = renderer.render(scene: scene, color: color, samples: job.samples, into: texture,
+                                              statsAlpha: f == 0 ? 1 : 0.35)
             // iterations only ever grow during a zoom-in, so colours never jump back
             let pixels = job.width * job.height
             let next = IterationTuner.adjust(maxIter: iter.maxIter, stats: stats, samples: pixels)
@@ -231,10 +229,11 @@ public final class FrameRenderer {
         paced = PacedEncoder(queue: engine.queue)
     }
 
-    /// Returns the escape statistics of the first sample.
+    /// Returns the escape statistics of the first sample and the GPU time taken.
     @discardableResult
     public func render(scene: FractalScene, color: ColorSettings, samples: Int, into dst: MTLTexture,
-                statsAlpha: Float) -> FSStats {
+                statsAlpha: Float) -> (stats: FSStats, gpuMs: Double) {
+        let startMs = paced.gpuMs
         let size = SIMD2(UInt32(width), UInt32(height))
         var firstSlot: UInt32 = 0
         for s in 0..<max(samples, 1) {
@@ -253,6 +252,6 @@ public final class FrameRenderer {
             }
         }
         paced.sync()
-        return engine.readStats(firstSlot)
+        return (engine.readStats(firstSlot), paced.gpuMs - startMs)
     }
 }

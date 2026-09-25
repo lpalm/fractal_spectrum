@@ -133,7 +133,7 @@ final class Autopilot {
         guard hi > lo else { return }
         // Around each candidate: the share of interior and of noise (much of either means a dark or
         // noisy view ahead).
-        let r = max(2, gw / 16)
+        let r = max(2, min(gw, gh) / 16)
         var candidates: [(score: Double, x: Int, y: Int)] = []
         let cx = Double(gw) / 2, cy = Double(gh) / 2, diag = hypot(cx, cy)
         let centre = now < exploreUntil ? 0.6 : -0.9

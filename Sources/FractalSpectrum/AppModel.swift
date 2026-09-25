@@ -514,6 +514,8 @@ final class AppModel {
     private func formulaChanged(from old: Formula) {
         renderer.formula = formula
         camera.minLog2Radius = formula.minLog2Radius
+        // targets (and a minibrot being approached) belong to the old set
+        if formula != old { pilot.reset() }
         if formula.family != old.family || formula.effectivePower != old.effectivePower || formula.julia != old.julia {
             engine.references.reset()
             iter.maxIter = IterationSettings().maxIter

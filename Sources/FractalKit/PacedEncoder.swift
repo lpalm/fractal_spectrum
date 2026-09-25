@@ -11,6 +11,8 @@ final class PacedEncoder {
     private(set) var enc: MTLComputeCommandEncoder
     private var encodedSamples = 0
     private var inFlight: [MTLCommandBuffer] = []
+    /// GPU time of all command buffers waited for so far.
+    private(set) var gpuMs = 0.0
     private let lock = NSLock()
     private var msPerSample = 2e-5
 
@@ -53,7 +55,7 @@ final class PacedEncoder {
         }
         cb.commit()
         inFlight.append(cb)
-        if inFlight.count > 2 { inFlight.removeFirst().waitUntilCompleted() }
+        if inFlight.count > 2 { wait(for: inFlight.removeFirst()) }
         cb = queue.makeCommandBuffer()!
         enc = cb.makeComputeCommandEncoder()!
         encodedSamples = 0
@@ -62,8 +64,13 @@ final class PacedEncoder {
     /// Commits the current command buffer and waits for all submitted work.
     func sync() {
         flush()
-        for b in inFlight { b.waitUntilCompleted() }
+        for b in inFlight { wait(for: b) }
         inFlight.removeAll()
+    }
+
+    private func wait(for b: MTLCommandBuffer) {
+        b.waitUntilCompleted()
+        gpuMs += (b.gpuEndTime - b.gpuStartTime) * 1000
     }
 
     deinit { enc.endEncoding() }
