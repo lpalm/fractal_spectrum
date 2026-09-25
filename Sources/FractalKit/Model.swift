@@ -89,8 +89,8 @@ public struct Viewport: @unchecked Sendable {
     public var zoomText: String {
         let l = zoomLog10
         if l < 4 { return String(format: "%.1f×", pow(10, l)) }
-        let e = floor(l)
-        return String(format: "%.2fe%.0f", pow(10, l - e), e)
+        let (m, e) = scientific(log10: l, digits: 2)
+        return String(format: "%.2fe%d", m, e)
     }
 
     /// Bits of precision needed for positions at this zoom on a `minSide`-sample grid.
@@ -98,6 +98,16 @@ public struct Viewport: @unchecked Sendable {
         let log2Step = log2Radius + 1 - log2(max(minSide, 1))
         return max(64, Int(-log2Step) + 48)
     }
+}
+
+/// Splits 10^`l` into a mantissa in [1, 10) rounded to `digits` decimals and an integer power of ten,
+/// carrying rounding overflow (9.999 → 1.00e+1) into the exponent.
+public func scientific(log10 l: Double, digits: Int) -> (mantissa: Double, exponent: Int) {
+    var e = floor(l)
+    let scale = pow(10, Double(digits))
+    var m = (pow(10, l - e) * scale).rounded() / scale
+    if m >= 10 { m /= 10; e += 1 }
+    return (m, Int(e))
 }
 
 /// Iteration limits and precision/speed trade-offs.

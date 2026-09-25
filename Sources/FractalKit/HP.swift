@@ -149,10 +149,8 @@ public struct FloatExp: Sendable, CustomStringConvertible {
 
     public var description: String {
         if m == 0 { return "0" }
-        let l10 = log2Abs * log10(2.0)
-        let ex = floor(l10)
-        let mant = pow(10, l10 - ex) * (m < 0 ? -1 : 1)
-        return String(format: "%.4fe%+.0f", mant, ex)
+        let (mant, ex) = scientific(log10: log2Abs * log10(2.0), digits: 4)
+        return String(format: "%.4fe%+d", m < 0 ? -mant : mant, ex)
     }
 }
 

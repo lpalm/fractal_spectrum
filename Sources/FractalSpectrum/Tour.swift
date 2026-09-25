@@ -15,9 +15,8 @@ enum ScaleFact {
     /// "1.2 × 10³⁰" style magnification.
     static func magnification(_ zoomLog10: Double) -> String {
         if zoomLog10 < 3 { return String(format: "%.0f×", pow(10, zoomLog10)) }
-        let e = floor(zoomLog10)
-        let m = pow(10, zoomLog10 - e)
-        return String(format: "%.1f × ", m) + power(Int(e))
+        let (m, e) = scientific(log10: zoomLog10, digits: 1)
+        return String(format: "%.1f × ", m) + power(e)
     }
 
     /// What the view's width would be if the whole set were scaled up to a familiar size.
