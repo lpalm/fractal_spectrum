@@ -129,6 +129,7 @@ final class AppModel {
             MainActor.assumeIsolated { self?.renderer.invalidate() }
         }
         renderer.onFrame = { [weak self] dt in MainActor.assumeIsolated { self?.tick(dt) } }
+        export.announce = { [weak self] message in self?.show(message, duration: 3) }
         renderer.onProbe = { [weak self] probe in
             MainActor.assumeIsolated {
                 guard let self, self.autopilot else { return }
@@ -470,10 +471,9 @@ final class AppModel {
         if recordingSince == nil { startRecording() } else { stopRecording() }
     }
 
-    /// Records the canvas as shown (without the interface) to a movie, by default in the Movies folder.
+    /// Records the canvas as shown (without the interface) to a movie, by default in the video export folder.
     func startRecording(to file: URL? = nil) {
-        let movies = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
-        let url = file ?? movies.appendingPathComponent(ExportController.defaultName("Spectrum Recording", "mp4"))
+        let url = file ?? export.videoFolder.appendingPathComponent(ExportController.defaultName("Spectrum Recording", "mp4"))
         do {
             renderer.recorder = try LiveRecorder(url: url, drawable: renderer.drawableSize)
             recordingSince = Date()

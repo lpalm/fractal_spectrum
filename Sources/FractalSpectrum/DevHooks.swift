@@ -69,19 +69,21 @@ final class DevHooks {
             }
         case "speed": model.pilot.speed = Double(arg) ?? model.pilot.speed
         case "export-image":
-            // export-image:<path> renders a small image there; export-image: saves to the image folder
-            // with the current settings
-            if !arg.isEmpty {
-                model.export.imageSize = ExportController.imageSizes[0]
-                model.export.imageSamples = 4
-            }
-            model.export.exportImage(model: model, to: arg.isEmpty ? nil : URL(fileURLWithPath: arg))
+            // export-image:<path> renders a quick 4K image there (the user's remembered settings are put
+            // back once the job has taken them); export-image: saves to the image folder as set up
+            let export = model.export
+            guard !arg.isEmpty else { return export.exportImage(model: model) }
+            let (size, samples) = (export.imageSize, export.imageSamples)
+            (export.imageSize, export.imageSamples) = (ExportController.imageSizes[0], 4)
+            export.exportImage(model: model, to: URL(fileURLWithPath: arg))
+            (export.imageSize, export.imageSamples) = (size, samples)
         case "export-video":
-            model.export.videoSize = ExportController.videoSizes[0]
-            model.export.fps = 30
-            model.export.duration = 6
-            model.export.videoSamples = 1
-            model.export.exportVideo(model: model, to: URL(fileURLWithPath: arg))
+            // export-video:<path> renders a quick 6-second 1080p video there
+            let export = model.export
+            let (size, fps, samples) = (export.videoSize, export.fps, export.videoSamples)
+            (export.videoSize, export.fps, export.duration, export.videoSamples) = (ExportController.videoSizes[0], 30, 6, 1)
+            export.exportVideo(model: model, to: URL(fileURLWithPath: arg))
+            (export.videoSize, export.fps, export.videoSamples) = (size, fps, samples)
         case "export-cancel": model.export.cancel()
         case "export-sheet":
             // export-sheet:image / export-sheet:video opens the export sheet; export-sheet:off closes it

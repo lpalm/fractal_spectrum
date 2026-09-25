@@ -1,7 +1,7 @@
 import SwiftUI
 import FractalKit
 
-/// The glass sidebar: formula, places, colour, quality and export.
+/// The glass sidebar: formula, places, colour, quality and export, each in its own card.
 struct Sidebar: View {
     @Bindable var model: AppModel
     let thumbnails: Thumbnails
@@ -9,7 +9,7 @@ struct Sidebar: View {
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 10) {
                 header
                 FractalSection(model: model, thumbnails: thumbnails)
                 PlacesSection(model: model, thumbnails: thumbnails)
@@ -17,7 +17,7 @@ struct Sidebar: View {
                 QualitySection(model: model)
                 ExportSection(model: model)
             }
-            .padding(16)
+            .padding(12)
         }
         .frame(width: Sidebar.width)
         .frame(maxHeight: .infinity, alignment: .top)
@@ -26,7 +26,7 @@ struct Sidebar: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Spacer().frame(height: 14)   // clear the window's traffic-light buttons
+            Spacer().frame(height: 18)   // clear the window's traffic-light buttons
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text("Spectrum")
                     .font(.rounded(26, .bold))
@@ -39,11 +39,13 @@ struct Sidebar: View {
                 .clipShape(Capsule())
                 .animation(.easeInOut(duration: 0.4), value: model.color.palette)
         }
+        .padding(.horizontal, 6)
+        .padding(.bottom, 6)
     }
 }
 
-/// Sidebar section whose expanded state persists across launches, with an optional control
-/// beside its title.
+/// A sidebar card with a title that folds it away (remembered across launches), and an optional
+/// control or note beside the title.
 struct CollapsibleSection<Content: View, Trailing: View>: View {
     let title: String
     @AppStorage private var expanded: Bool
@@ -59,7 +61,7 @@ struct CollapsibleSection<Content: View, Trailing: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 6) {
                 Button {
                     withAnimation(.spring(duration: 0.35)) { expanded.toggle() }
@@ -78,13 +80,16 @@ struct CollapsibleSection<Content: View, Trailing: View>: View {
                 }
                 .buttonStyle(.plain)
                 Spacer()
-                if expanded { trailing() }
+                trailing()
             }
             if expanded {
                 content()
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
+        .padding(12)
+        .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Color.white.opacity(0.07)))
     }
 }
 
@@ -112,7 +117,7 @@ struct FractalSection: View {
                 }
             }
             if model.formula.family == .mandelbrot {
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     Text("Power")
                         .font(.rounded(12, .medium))
                         .foregroundStyle(.secondary)
@@ -132,20 +137,11 @@ struct FractalSection: View {
                     }
                 }
             }
-            Toggle(isOn: Binding(get: { model.formula.julia }, set: { if $0 != model.formula.julia { model.toggleJulia() } })) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Julia set")
-                        .font(.rounded(13, .semibold))
-                    Text(model.formula.julia
-                         ? String(format: "c = %.5f %+.5fi", model.formula.juliaRe, model.formula.juliaIm)
-                         : "Hold ⌥ over the set to preview, click to pick c")
-                        .font(.rounded(11))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-            }
-            .toggleStyle(.switch)
-            .controlSize(.small)
+            SwitchRow("Julia set",
+                      detail: model.formula.julia ? String(format: "c = %.5f %+.5fi", model.formula.juliaRe, model.formula.juliaIm)
+                                                  : "Hold ⌥ over the set to preview",
+                      isOn: Binding(get: { model.formula.julia }, set: { if $0 != model.formula.julia { model.toggleJulia() } }))
+                .help("Hold ⌥ over the Mandelbrot set to preview a Julia set; ⌥-click opens it")
         }
     }
 }
@@ -170,7 +166,7 @@ struct FamilyTile: View {
                             .transition(.opacity)
                     }
                 }
-                .frame(height: 72)
+                .frame(height: 62)
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -191,18 +187,19 @@ struct FamilyTile: View {
     }
 }
 
-/// The user's saved places and the curated ones.
+/// The user's saved places and the curated ones (the first few, or all of them).
 struct PlacesSection: View {
     @Bindable var model: AppModel
     let thumbnails: Thumbnails
+    @AppStorage("places.showAll") private var showAll = false
     private let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
+    /// Curated places shown while the list is folded.
+    private static let foldedCount = 6
 
     var body: some View {
         CollapsibleSection("Explore", id: "explore") {
             if !model.bookmarks.isEmpty {
-                Text("Your Places")
-                    .font(.rounded(11, .semibold))
-                    .foregroundStyle(.secondary)
+                subheading("Your Places")
                 LazyVGrid(columns: columns, spacing: 10) {
                     ForEach(model.bookmarks) { place in
                         PlaceTile(location: place, image: thumbnails.image(for: place)) { model.fly(to: place) }
@@ -212,16 +209,24 @@ struct PlacesSection: View {
                             .onAppear { thumbnails.requestLocation(place, color: model.color) }
                     }
                 }
-                Text("Curated")
-                    .font(.rounded(11, .semibold))
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 4)
+                subheading("Curated")
+                    .padding(.top, 2)
             }
             LazyVGrid(columns: columns, spacing: 10) {
-                ForEach(Location.all) { place in
+                ForEach(showAll ? Location.all : Array(Location.all.prefix(PlacesSection.foldedCount))) { place in
                     PlaceTile(location: place, image: thumbnails.image(for: place)) { model.fly(to: place) }
                 }
             }
+            Button {
+                withAnimation(.spring(duration: 0.35)) { showAll.toggle() }
+            } label: {
+                Text(showAll ? "Show fewer" : "Show all \(Location.all.count) places")
+                    .font(.rounded(12, .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(maxWidth: .infinity)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         } trailing: {
             Button { model.addBookmark() } label: {
                 Label("Save view", systemImage: "plus")
@@ -232,9 +237,15 @@ struct PlacesSection: View {
             .help("Save the current view to Your Places (B)")
         }
     }
+
+    private func subheading(_ text: String) -> some View {
+        Text(text)
+            .font(.rounded(11, .semibold))
+            .foregroundStyle(.secondary)
+    }
 }
 
-/// Thumbnail tile of a place with its name and magnification.
+/// Thumbnail tile of a place with its name and magnification; the formula is in the tooltip.
 struct PlaceTile: View {
     let location: Location
     let image: NSImage?
@@ -243,7 +254,7 @@ struct PlaceTile: View {
 
     var body: some View {
         Button(action: action) {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 5) {
                 ZStack(alignment: .bottomTrailing) {
                     RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.black.opacity(0.35))
                     if let image {
@@ -263,17 +274,13 @@ struct PlaceTile: View {
                         .background(.black.opacity(0.55), in: Capsule())
                         .padding(5)
                 }
-                .frame(height: 76)
+                .frame(height: 66)
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(Color.white.opacity(hover ? 0.35 : 0.08), lineWidth: 1))
                 .scaleEffect(hover ? 1.03 : 1)
                 Text(location.name)
                     .font(.rounded(12, .semibold))
-                    .lineLimit(1)
-                Text(location.formula.displayName)
-                    .font(.rounded(10))
-                    .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
             .contentShape(Rectangle())
@@ -282,33 +289,31 @@ struct PlaceTile: View {
         .onHover { hover = $0 }
         .animation(.easeOut(duration: 0.15), value: hover)
         .animation(.easeOut(duration: 0.3), value: image != nil)
-        .help(location.name + " · " + ScaleFact.magnification(location.zoom))
+        .help("\(location.name) · \(location.formula.displayName) · " + ScaleFact.magnification(location.zoom))
     }
 }
 
-/// Palettes, the escape-time mapping and the shading controls.
+/// Palettes, the escape-time mapping and the shading controls (folded under "Adjust").
 struct ColorSection: View {
     @Bindable var model: AppModel
-    private let columns = [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)]
+    @AppStorage("colour.adjust") private var adjusting = false
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 6), count: 5)
 
     var body: some View {
         CollapsibleSection("Colour", id: "colour") {
-            LazyVGrid(columns: columns, spacing: 8) {
+            LazyVGrid(columns: columns, spacing: 6) {
                 ForEach(Palette.all) { palette in
                     let selected = model.color.palette == palette.id
                     Button { model.setPalette(palette.id) } label: {
-                        VStack(alignment: .leading, spacing: 3) {
-                            PaletteStrip(palette: palette)
-                                .frame(height: 16)
-                                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-                                .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                    .strokeBorder(selected ? Color.white : Color.white.opacity(0.1), lineWidth: selected ? 2 : 1))
-                            Text(palette.name)
-                                .font(.rounded(11, selected ? .semibold : .regular))
-                                .foregroundStyle(selected ? .primary : .secondary)
-                        }
+                        PaletteStrip(palette: palette)
+                            .frame(height: 22)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .strokeBorder(selected ? Color.white : Color.white.opacity(0.12), lineWidth: selected ? 2 : 1))
                     }
                     .buttonStyle(.plain)
+                    .help(palette.name)
+                    .accessibilityLabel(palette.name)
                 }
             }
             Picker("", selection: $model.color.mapping) {
@@ -319,22 +324,29 @@ struct ColorSection: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            LabeledSlider(title: "Density", value: $model.color.density, range: 0.02...3, logarithmic: true)
-            LabeledSlider(title: "Phase", value: $model.color.offset, range: 0...1)
-            LabeledSlider(title: "Relief", value: $model.color.lightStrength, range: 0...1)
-            LabeledSlider(title: "Light angle", value: $model.color.lightAzimuth, range: -Double.pi...Double.pi)
-            LabeledSlider(title: "Edges", value: $model.color.edgeStrength, range: 0...1)
+            SwitchRow("Animate colours", isOn: $model.cycleColors)
             if model.hdrAvailable {
-                Toggle("HDR highlights", isOn: $model.hdr)
-                    .font(.rounded(12, .medium))
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
+                SwitchRow("HDR highlights", isOn: $model.hdr)
                     .help("Let the brightest parts glow beyond standard white on HDR displays")
             }
-            Toggle("Animate colours", isOn: $model.cycleColors)
-                .font(.rounded(12, .medium))
-                .toggleStyle(.switch)
-                .controlSize(.small)
+            DisclosureGroup(isExpanded: $adjusting.animation(.spring(duration: 0.35))) {
+                VStack(alignment: .leading, spacing: 8) {
+                    LabeledSlider(title: "Density", value: $model.color.density, range: 0.02...3, logarithmic: true)
+                    LabeledSlider(title: "Phase", value: $model.color.offset, range: 0...1)
+                    LabeledSlider(title: "Relief", value: $model.color.lightStrength, range: 0...1)
+                    LabeledSlider(title: "Light angle", value: $model.color.lightAzimuth, range: -Double.pi...Double.pi)
+                    LabeledSlider(title: "Edges", value: $model.color.edgeStrength, range: 0...1)
+                }
+                .padding(.top, 6)
+            } label: {
+                Text("Adjust")
+                    .font(.rounded(12, .medium))
+                    .foregroundStyle(.secondary)
+            }
+        } trailing: {
+            Text(Palette.all[model.color.palette].name)
+                .font(.rounded(11, .medium))
+                .foregroundStyle(.secondary)
         }
     }
 }
@@ -397,10 +409,50 @@ struct ExportSection: View {
             }
             if model.export.running {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(model.export.status).font(.rounded(11, .medium))
+                    HStack {
+                        Text(model.export.status)
+                        Spacer()
+                        Text(model.export.eta)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    .font(.rounded(11, .medium))
                     ProgressView(value: model.export.progress).controlSize(.small)
                 }
             }
+        }
+    }
+}
+
+/// A setting with its switch at the trailing edge, and optionally a line of detail below its title.
+struct SwitchRow: View {
+    let title: String
+    let detail: String?
+    @Binding var isOn: Bool
+
+    init(_ title: String, detail: String? = nil, isOn: Binding<Bool>) {
+        self.title = title
+        self.detail = detail
+        _isOn = isOn
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.rounded(12, .medium))
+                if let detail {
+                    Text(detail)
+                        .font(.rounded(11))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+            }
+            Spacer(minLength: 0)
+            Toggle(title, isOn: $isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
         }
     }
 }

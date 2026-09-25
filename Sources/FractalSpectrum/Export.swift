@@ -89,6 +89,8 @@ final class ExportController {
     var lastOutput: URL?
     /// Called once when the running export ends.
     @ObservationIgnored var onFinish: (() -> Void)?
+    /// Receives the outcome of every export ("Saved …", "Cancelled", or the error), for a notice.
+    @ObservationIgnored var announce: ((String) -> Void)?
     @ObservationIgnored private let cancelToken = CancelToken()
     @ObservationIgnored private var started = Date()
 
@@ -218,6 +220,7 @@ final class ExportController {
         running = false
         status = message
         if let url { lastOutput = url }
+        announce?(message)
         onFinish?()
         onFinish = nil
     }
