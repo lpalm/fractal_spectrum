@@ -50,6 +50,13 @@ typedef struct {
     fs_uint statsSlot;
     fs_uint blaOffset[FS_MAX_BLA_LEVELS];
     fs_uint blaCount[FS_MAX_BLA_LEVELS];
+    // Julia sets: second reference (orbit of the critical point 0) that pixels rebase onto.
+    fs_uint refLen2;
+    fs_uint blaLevels2;
+    fs_uint pad2;
+    fs_uint pad3;
+    fs_uint blaOffset2[FS_MAX_BLA_LEVELS];
+    fs_uint blaCount2[FS_MAX_BLA_LEVELS];
 } FSIterParams;
 
 // Reference orbit point in extended range: value = m * 2^e.

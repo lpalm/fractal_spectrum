@@ -6,6 +6,9 @@ import CFractal
 public final class ReferenceOrbit: @unchecked Sendable {
     public let family: FractalFamily
     public let power: Int
+    /// Julia parameter for orbits in a Julia set's plane; nil for parameter-plane orbits.
+    public let julia: SIMD2<Double>?
+    /// Start of the orbit: c for parameter-plane orbits (which start at 0), z0 for Julia orbits.
     public let center: PlanePoint
     public let precision: Int
 
@@ -27,14 +30,21 @@ public final class ReferenceOrbit: @unchecked Sendable {
     init(formula: Formula, center: PlanePoint, precision: Int, capacity: Int) {
         family = formula.family
         power = formula.effectivePower
+        julia = formula.julia ? SIMD2(formula.juliaRe, formula.juliaIm) : nil
         self.center = center.withPrecision(precision)
         self.precision = precision
         self.capacity = max(capacity, 1024)
         let device = GPU.shared.device
         zfBuffer = device.makeBuffer(length: self.capacity * MemoryLayout<SIMD2<Float>>.stride, options: .storageModeShared)!
         zxBuffer = device.makeBuffer(length: self.capacity * MemoryLayout<FSRefExt>.stride, options: .storageModeShared)!
-        job = fs_ref_new(family.formulaID, Int32(power), 0, self.center.re.ptr, self.center.im.ptr,
-                         nil, nil, nil, nil, precision)
+        if let j = julia {
+            let jre = HPFloat(j.x, precision: precision), jim = HPFloat(j.y, precision: precision)
+            job = fs_ref_new(family.formulaID, Int32(power), 1, nil, nil, self.center.re.ptr, self.center.im.ptr,
+                             jre.ptr, jim.ptr, precision)
+        } else {
+            job = fs_ref_new(family.formulaID, Int32(power), 0, self.center.re.ptr, self.center.im.ptr,
+                             nil, nil, nil, nil, precision)
+        }
         cancelFlag.pointee = 0
         progressPtr.pointee = 0
     }
@@ -138,8 +148,46 @@ public final class ReferenceStore: @unchecked Sendable {
     }
 
     private func suits(_ r: ReferenceOrbit, _ formula: Formula, _ view: Viewport, need: Int, slack: Double) -> Bool {
-        guard r.family == formula.family, r.power == formula.effectivePower, r.precision >= need else { return false }
+        guard r.family == formula.family, r.power == formula.effectivePower, r.precision >= need,
+              r.julia == (formula.julia ? SIMD2(formula.juliaRe, formula.juliaIm) : nil) else { return false }
         return view.center.minus(r.center).log2Abs <= view.log2Radius + slack
+    }
+
+    private var critical: ReferenceOrbit?
+
+    /// Orbit of the critical point 0 for a Julia set's parameter: the target Julia pixels rebase onto.
+    /// Returns nil while it is being computed (unless `blocking`).
+    func criticalOrbit(formula: Formula, precision need: Int, length: Int, blocking: Bool) -> ReferenceOrbit? {
+        var f = formula
+        f.julia = false
+        let c = SIMD2(formula.juliaRe, formula.juliaIm)
+        lock.lock()
+        var r = critical
+        if let cur = r, cur.family != f.family || cur.power != f.effectivePower || cur.precision < need
+            || cur.center.re.doubleValue != c.x || cur.center.im.doubleValue != c.y {
+            cur.cancel()
+            r = nil
+        }
+        if r == nil {
+            let prec = need + 64
+            r = ReferenceOrbit(formula: f, center: PlanePoint(re: HPFloat(c.x, precision: prec), im: HPFloat(c.y, precision: prec)),
+                               precision: prec, capacity: length + 1)
+            critical = r
+        }
+        lock.unlock()
+        guard let orbit = r else { return nil }
+        if !orbit.covers(length) && !orbit.isComputing {
+            if blocking {
+                orbit.extend(to: length)
+            } else {
+                queue.async { [weak self] in
+                    orbit.extend(to: length)
+                    DispatchQueue.main.async { self?.onUpdate?() }
+                }
+                return orbit.snapshot.count >= 2 && !orbit.isComputing ? orbit : nil
+            }
+        }
+        return orbit.isComputing ? nil : orbit
     }
 
     /// Returns a reference usable for `view`, starting background work when a better one is needed.
@@ -207,6 +255,8 @@ public final class ReferenceStore: @unchecked Sendable {
         pending?.cancel()
         pending = nil
         current = nil
+        critical?.cancel()
+        critical = nil
         lock.unlock()
     }
 }

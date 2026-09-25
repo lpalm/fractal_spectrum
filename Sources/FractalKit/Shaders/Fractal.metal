@@ -218,7 +218,7 @@ struct Der {
 
 inline Der der_init() {
     Der d;
-    d.J = JULIA ? float4(1.0f, 0.0f, 0.0f, 1.0f) : float4(0.0f);
+    d.J = JULIA ? (IS_MANDEL ? float4(1.0f, 0.0f, 0.0f, 0.0f) : float4(1.0f, 0.0f, 0.0f, 1.0f)) : float4(0.0f);
     d.e = 0;
     return d;
 }
@@ -406,22 +406,53 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
                             device const float *blaLogR [[buffer(6)]],
                             device atomic_uint *stats [[buffer(7)]],
                             device const float *blaMinZ [[buffer(8)]],
+                            device const float2 *Zf2 [[buffer(9)]],
+                            device const FSRefExt *Zx2 [[buffer(10)]],
+                            device const FSBLAEntry *bla2 [[buffer(11)]],
+                            device const float *blaR2b [[buffer(12)]],
+                            device const float *blaLogRb [[buffer(13)]],
+                            device const float *blaMinZb [[buffer(14)]],
                             uint2 gid [[thread_position_in_grid]]) {
     uint2 pix = gid + P.origin;
     bool active = gid.x < P.workSize.x && gid.y < P.workSize.y;
     float2 pp = float2(pix) + 0.5f + P.jitter - 0.5f * float2(P.size);
+    // Offset of this pixel from the reference start: dc for the parameter plane, the initial delta
+    // for Julia sets (whose iteration adds no per-pixel constant).
     fx dc = fx_add(fx{P.offsetM, P.offsetE}, fx{pp.x * P.stepX + pp.y * P.stepY, P.stepE});
     float2 dcA = scl(dc.m, dc.e);
-    uint n = 1, m = 1;
+    // Mandelbrot type: z_1 = Z_1 + dc. Julia: z_0 = Z_0 + offset.
+    uint n = JULIA ? 0 : 1, m = JULIA ? 0 : 1;
     bool ext = DEEP && dc.e < -60;
     float2 d = dcA;
     fx w = dc;
+    if (JULIA) {
+        dcA = float2(0.0f);
+        dc = fx{float2(0.0f), FS_ZERO_EXP};
+    }
     Der der = der_init();
-    if (WITH_DER) der.J = float4(1.0f, 0.0f, IS_MANDEL ? 0.0f : 0.0f, IS_MANDEL ? 0.0f : 1.0f);
+    if (WITH_DER) der.J = IS_MANDEL ? float4(1.0f, 0.0f, 0.0f, 0.0f) : float4(1.0f, 0.0f, 0.0f, 1.0f);
+    // Julia sets rebase onto the critical orbit (second reference); Mandelbrot types onto their own start.
+    bool second = false;
+    device const float2 *zf = Zf;
+    device const FSRefExt *zxr = Zx;
+    device const FSBLAEntry *blaT = bla;
+    device const float *r2T = blaR2;
+    device const float *lrT = blaLogR;
+    device const float *mzT = blaMinZ;
+    constant uint *offT = P.blaOffset;
+    constant uint *cntT = P.blaCount;
+    uint levels = P.blaLevels;
     bool escaped = false;
     float2 zEsc = float2(0.0f);
     uint maxIter = active ? P.maxIter : 0;
     uint refEnd = P.refLen - 1;
+    #define SWITCH_TO_CRITICAL                                                               \
+        if (JULIA && !second) {                                                              \
+            second = true;                                                                   \
+            zf = Zf2; zxr = Zx2; blaT = bla2; r2T = blaR2b; lrT = blaLogRb; mzT = blaMinZb;  \
+            offT = P.blaOffset2; cntT = P.blaCount2; levels = P.blaLevels2;                  \
+            refEnd = P.refLen2 - 1;                                                          \
+        }
     float4 Jz = IS_MANDEL ? float4(1.0f, 0.0f, 0.0f, 0.0f) : float4(1.0f, 0.0f, 0.0f, 1.0f);
     int jze = 0;
     int jrec = 0;
@@ -434,7 +465,7 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
         FSRefExt Zr;
         fx zx = fx{float2(0.0f), FS_ZERO_EXP};
         if (!ext) {
-            Z = Zf[m];
+            Z = zf[m];
             z = Z + d;
             float r2 = dot(z, z);
             if (r2 > P.bailout2) { escaped = true; zEsc = z; break; }
@@ -446,11 +477,17 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
                 rmin2 = r2;
             }
             float d2 = dot(d, d);
-            if (r2 < d2 || m >= refEnd) { d = z; m = 0; Z = float2(0.0f); d2 = r2; }
+            if (r2 < d2 || m >= refEnd) {
+                SWITCH_TO_CRITICAL
+                d = z;
+                m = 0;
+                Z = float2(0.0f);
+                d2 = r2;
+            }
             if (DEEP && d2 < 0x1p-124f) { ext = true; w = fx_norm(d, 0); }
         }
         if (DEEP && ext) {
-            Zr = Zx[m];
+            Zr = zxr[m];
             zx = fx_add(fx{Zr.m, Zr.e}, w);
             if (zx.e > -40) {
                 float2 zz = scl(zx.m, zx.e);
@@ -470,9 +507,14 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
                 int de2 = clamp(2 * (zx.e - w.e), -250, 2);
                 rebase = dot(zx.m, zx.m) * scl(1.0f, de2) < dot(w.m, w.m);
             }
-            if (rebase) { w = zx; m = 0; Zr = FSRefExt{float2(0.0f), FS_ZERO_EXP, 0}; }
-            if (w.e > -60) { ext = false; d = scl(w.m, w.e); Z = Zf[m]; z = Z + d; }
-            else { Z = Zf[m]; z = Z + scl(w.m, w.e); }
+            if (rebase) {
+                SWITCH_TO_CRITICAL
+                w = zx;
+                m = 0;
+                Zr = FSRefExt{float2(0.0f), FS_ZERO_EXP, 0};
+            }
+            if (w.e > -60) { ext = false; d = scl(w.m, w.e); Z = zf[m]; z = Z + d; }
+            else { Z = zf[m]; z = Z + scl(w.m, w.e); }
         }
         bool stepped = false;
         if (USE_BLA && m > 0) {
@@ -481,30 +523,30 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
             uint idx = 0;
             if (!ext) {
                 float d2 = dot(d, d);
-                for (uint k = 0; k < P.blaLevels; k++) {
+                for (uint k = 0; k < levels; k++) {
                     if ((j & ((1u << k) - 1u)) != 0u) break;
                     uint jj = j >> k;
-                    if (jj >= P.blaCount[k]) break;
-                    uint id = P.blaOffset[k] + jj;
-                    if (!(d2 < blaR2[id])) break;
+                    if (jj >= cntT[k]) break;
+                    uint id = offT[k] + jj;
+                    if (!(d2 < r2T[id])) break;
                     best = int(k);
                     idx = id;
                 }
             } else {
                 float lr = 0.5f * log2(dot(w.m, w.m)) + float(w.e);
-                for (uint k = 0; k < P.blaLevels; k++) {
+                for (uint k = 0; k < levels; k++) {
                     if ((j & ((1u << k) - 1u)) != 0u) break;
                     uint jj = j >> k;
-                    if (jj >= P.blaCount[k]) break;
-                    uint id = P.blaOffset[k] + jj;
-                    if (!(lr < blaLogR[id])) break;
+                    if (jj >= cntT[k]) break;
+                    uint id = offT[k] + jj;
+                    if (!(lr < lrT[id])) break;
                     best = int(k);
                     idx = id;
                 }
             }
             if (best >= 0) {
-                FSBLAEntry E = bla[idx];
-                float lmz = blaMinZ[idx];
+                FSBLAEntry E = blaT[idx];
+                float lmz = mzT[idx];
                 if (lmz < lrmin) {
                     pendingRec = pendingRec || lmz < lrmin - 1.0f;
                     lrmin = lmz;
@@ -513,8 +555,13 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
                 if (IS_MANDEL) Jz.xy = cmul(float2(E.A.x, E.A.z), Jz.xy);
                 else Jz = matmul(E.A, Jz);
                 jze += E.Ae;
-                if (!ext) d = scl(matvec(E.A, d), E.Ae) + scl(matvec(E.B, dc.m), E.Be + dc.e);
-                else w = fx_add(fx{matvec(E.A, w.m), E.Ae + w.e}, fx{matvec(E.B, dc.m), E.Be + dc.e});
+                if (!ext) {
+                    d = scl(matvec(E.A, d), E.Ae);
+                    if (!JULIA) d += scl(matvec(E.B, dc.m), E.Be + dc.e);
+                } else {
+                    w = JULIA ? fx_norm(matvec(E.A, w.m), E.Ae + w.e)
+                              : fx_add(fx{matvec(E.A, w.m), E.Ae + w.e}, fx{matvec(E.B, dc.m), E.Be + dc.e});
+                }
                 if (WITH_DER) der = der_bla(der, E);
                 uint l = 1u << uint(best);
                 m += l;
@@ -534,7 +581,7 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
                 if (IS_MANDEL) Jz.xy = cmul(float2(M.x, M.z), Jz.xy);
                 else Jz = matmul(M, Jz);
                 jze += (IS_MANDEL ? POWER - 1 : 1) * zx.e;
-                w = fx_add(pert_ext(Zr, w), dc);
+                w = JULIA ? pert_ext(Zr, w) : fx_add(pert_ext(Zr, w), dc);
             }
             m++;
             n++;
@@ -552,6 +599,7 @@ kernel void iterate_perturb(device GSample *out [[buffer(0)]],
     uint status = escaped ? 0u : (inside ? 1u : 2u);
     if (active) store_sample(out, P, pix, finish(escaped, escaped ? n : P.maxIter, zEsc, der, P));
     record_stats(stats, active, status, n, P.maxIter, P.statsSlot);
+    #undef SWITCH_TO_CRITICAL
 }
 
 // ---------------------------------------------------------------------------------------------

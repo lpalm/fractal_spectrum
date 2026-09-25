@@ -58,6 +58,8 @@ public final class Engine: @unchecked Sendable {
         var pipeline: MTLComputePipelineState
         var ref: ReferenceOrbit.Snapshot?
         var bla: BLATable?
+        var critical: ReferenceOrbit.Snapshot?
+        var criticalBLA: BLATable?
         public var perturbed: Bool
         public var deep: Bool
         public var effectiveMaxIter: Int
@@ -103,17 +105,24 @@ public final class Engine: @unchecked Sendable {
         key.julia = f.julia
         key.withDer = scene.iter.derivative
 
-        let perturb = !f.julia && log2Step < -18
+        let perturb = log2Step < -18
         if !perturb {
             p.offsetM = SIMD2(Float(v.center.re.doubleValue), Float(v.center.im.doubleValue))
-            return Plan(params: p, pipeline: gpu.pipeline(key), ref: nil, bla: nil, perturbed: false, deep: false,
-                        effectiveMaxIter: maxIter)
+            return Plan(params: p, pipeline: gpu.pipeline(key), ref: nil, bla: nil, critical: nil, criticalBLA: nil,
+                        perturbed: false, deep: false, effectiveMaxIter: maxIter)
         }
 
         guard let ref = references.reference(formula: f, view: v, minSide: minSide, length: maxIter + 1,
                                              focus: focus, blocking: blocking) else { return nil }
         let snap = ref.snapshot
         guard snap.count >= 2 else { return nil }
+        var criticalRef: ReferenceOrbit?
+        if f.julia {
+            guard let c = references.criticalOrbit(formula: f, precision: v.requiredPrecision(minSide: minSide),
+                                                   length: maxIter + 1, blocking: blocking),
+                  c.snapshot.count >= 2 else { return nil }
+            criticalRef = c
+        }
         let offset = v.center.minus(ref.center)
         let sh = offset.shared
         p.offsetM = sh.m
@@ -122,18 +131,41 @@ public final class Engine: @unchecked Sendable {
         p.maxIter = UInt32(effMax)
         p.refLen = UInt32(snap.count)
 
-        // Largest |dc| over the grid decides how far each approximation may reach.
+        // Largest |dc| over the grid decides how far each approximation may reach (no dc for Julia sets).
         let halfDiag = log2Step + log2(0.5 * hypot(Double(grid.width), Double(grid.height)))
         let lo = offset.log2Abs
-        let log2C = lo.isFinite ? max(lo, halfDiag) + log2(1 + exp2(-abs(lo - halfDiag))) : halfDiag
+        let log2C = f.julia ? -1e30
+            : (lo.isFinite ? max(lo, halfDiag) + log2(1 + exp2(-abs(lo - halfDiag))) : halfDiag)
         let eps = scene.iter.blaLog2Eps
-        var table = scene.iter.useBLA ? ref.bla : nil
-        if !scene.iter.useBLA {
-        } else if table == nil || table!.refCount != snap.count || table!.log2Eps != eps
-            || log2C > table!.log2C || log2C < table!.log2C - 4 {
-            table = BLATable(encodingInto: enc, snapshot: snap, formula: f, log2C: log2C + 1, log2Eps: eps,
-                             reuse: exclusive ? ref.bla : nil)
-            ref.bla = table
+        func blaTable(for r: ReferenceOrbit, _ s: ReferenceOrbit.Snapshot, formula: Formula) -> BLATable? {
+            guard scene.iter.useBLA else { return nil }
+            if let t = r.bla, t.refCount == s.count, t.log2Eps == eps, log2C <= t.log2C, log2C >= t.log2C - 4 { return t }
+            let t = BLATable(encodingInto: enc, snapshot: s, formula: formula, log2C: log2C + 1, log2Eps: eps,
+                             reuse: exclusive ? r.bla : nil)
+            r.bla = t
+            return t
+        }
+        let table = blaTable(for: ref, snap, formula: f)
+        var critSnap: ReferenceOrbit.Snapshot?
+        var critTable: BLATable?
+        if let c = criticalRef {
+            var fc = f
+            fc.julia = false
+            let cs = c.snapshot
+            critSnap = cs
+            critTable = blaTable(for: c, cs, formula: fc)
+            p.refLen2 = UInt32(cs.count)
+            if let t = critTable {
+                p.blaLevels2 = UInt32(t.offsets.count)
+                withUnsafeMutableBytes(of: &p.blaOffset2) { raw in
+                    let b = raw.bindMemory(to: UInt32.self)
+                    for (i, o) in t.offsets.enumerated() { b[i] = o }
+                }
+                withUnsafeMutableBytes(of: &p.blaCount2) { raw in
+                    let b = raw.bindMemory(to: UInt32.self)
+                    for (i, c) in t.counts.enumerated() { b[i] = c }
+                }
+            }
         }
         if let t = table {
             p.blaLevels = UInt32(t.offsets.count)
@@ -150,8 +182,8 @@ public final class Engine: @unchecked Sendable {
         key.name = "iterate_perturb"
         key.useBLA = table != nil
         key.deep = deep
-        return Plan(params: p, pipeline: gpu.pipeline(key), ref: snap, bla: table, perturbed: true, deep: deep,
-                    effectiveMaxIter: effMax)
+        return Plan(params: p, pipeline: gpu.pipeline(key), ref: snap, bla: table, critical: critSnap,
+                    criticalBLA: critTable, perturbed: true, deep: deep, effectiveMaxIter: effMax)
     }
 
     /// Iterates the samples of `origin ..< origin + size` into `gbuf` laid out from `bufOrigin` with `bufStride`.
@@ -172,6 +204,12 @@ public final class Engine: @unchecked Sendable {
             enc.setBuffer(plan.bla?.r2 ?? dummy, offset: 0, index: 5)
             enc.setBuffer(plan.bla?.logR ?? dummy, offset: 0, index: 6)
             enc.setBuffer(plan.bla?.minZ ?? dummy, offset: 0, index: 8)
+            enc.setBuffer(plan.critical?.zf ?? dummy, offset: 0, index: 9)
+            enc.setBuffer(plan.critical?.zx ?? dummy, offset: 0, index: 10)
+            enc.setBuffer(plan.criticalBLA?.entries ?? dummy, offset: 0, index: 11)
+            enc.setBuffer(plan.criticalBLA?.r2 ?? dummy, offset: 0, index: 12)
+            enc.setBuffer(plan.criticalBLA?.logR ?? dummy, offset: 0, index: 13)
+            enc.setBuffer(plan.criticalBLA?.minZ ?? dummy, offset: 0, index: 14)
         }
         enc.setBuffer(stats, offset: 0, index: 7)
         gpu.dispatch2D(enc, plan.pipeline, width: Int(size.x), height: Int(size.y))

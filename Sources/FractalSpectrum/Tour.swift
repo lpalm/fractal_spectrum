@@ -52,5 +52,6 @@ enum ScaleFact {
 
 extension Location {
     /// Stops of the guided tour, in order.
-    static let tourIDs = ["seahorse", "galaxy", "crown", "twin", "garden", "ancient", "abyss", "edge", "armada", "rabbit"]
+    static let tourIDs = ["seahorse", "galaxy", "crown", "twin", "garden", "ancient", "abyss", "edge", "armada", "dragon",
+                          "dragonheart", "rabbit"]
 }

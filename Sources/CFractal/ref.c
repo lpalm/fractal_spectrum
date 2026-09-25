@@ -195,10 +195,11 @@ long fs_ref_run(FSRefJob *j, long target, fs_float2 *zf, FSRefExt *zx, double ba
     return j->count;
 }
 
-long fs_oracle_pixel(int formula, int power, const FSHP *cre, const FSHP *cim, long maxIter, double bailout2,
-                     double *smoothFrac) {
+long fs_oracle_pixel(int formula, int power, const FSHP *cre, const FSHP *cim, const FSHP *jre, const FSHP *jim,
+                     long maxIter, double bailout2, double *smoothFrac) {
     long prec = mpfr_get_prec(cre->v) + 32;
-    FSRefJob *j = fs_ref_new(formula, power, 0, cre, cim, NULL, NULL, NULL, NULL, prec);
+    FSRefJob *j = jre ? fs_ref_new(formula, power, 1, NULL, NULL, cre, cim, jre, jim, prec)
+                      : fs_ref_new(formula, power, 0, cre, cim, NULL, NULL, NULL, NULL, prec);
     j->useDouble = 0;
     long n = 0;
     double r2 = 0;

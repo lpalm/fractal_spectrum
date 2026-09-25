@@ -80,8 +80,15 @@ extension Engine {
     /// Full-precision CPU iteration count of one point.
     public static func oracle(formula: Formula, point: PlanePoint, maxIter: Int, bailout: Double) -> (n: Int, frac: Double) {
         var frac = 0.0
-        let n = fs_oracle_pixel(formula.family.formulaID, Int32(formula.effectivePower), point.re.ptr, point.im.ptr,
-                                maxIter, bailout * bailout, &frac)
+        let n: Int
+        if formula.julia {
+            let jre = HPFloat(formula.juliaRe, precision: point.precision), jim = HPFloat(formula.juliaIm, precision: point.precision)
+            n = fs_oracle_pixel(formula.family.formulaID, Int32(formula.effectivePower), point.re.ptr, point.im.ptr,
+                                jre.ptr, jim.ptr, maxIter, bailout * bailout, &frac)
+        } else {
+            n = fs_oracle_pixel(formula.family.formulaID, Int32(formula.effectivePower), point.re.ptr, point.im.ptr,
+                                nil, nil, maxIter, bailout * bailout, &frac)
+        }
         return (n, frac)
     }
 }

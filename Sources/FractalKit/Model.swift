@@ -54,8 +54,8 @@ public struct Formula: Hashable, Codable, Sendable {
         return s
     }
 
-    /// Deepest usable zoom: Julia sets are rendered directly in float.
-    public var minLog2Radius: Double { julia ? -17 : -60_000 }
+    /// Deepest supported zoom (log2 of the view radius).
+    public var minLog2Radius: Double { -60_000 }
 }
 
 /// What part of the plane is on screen.

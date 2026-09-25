@@ -53,9 +53,10 @@ long fs_find_nucleus(const FSHP *cre, const FSHP *cim, long period, long maxStep
 double fs_nucleus_log2size(const FSHP *cre, const FSHP *cim, long period);
 
 // ---- CPU oracle for verification ----
-// Iterates one pixel at full precision; returns the escape iteration or maxIter.
-long fs_oracle_pixel(int formula, int power, const FSHP *cre, const FSHP *cim, long maxIter, double bailout2,
-                     double *smoothFrac);
+// Iterates one pixel at full precision; returns the escape iteration or maxIter. With (jre, jim) the
+// point is the Julia starting value z0 = (cre, cim) for parameter (jre, jim).
+long fs_oracle_pixel(int formula, int power, const FSHP *cre, const FSHP *cim, const FSHP *jre, const FSHP *jim,
+                     long maxIter, double bailout2, double *smoothFrac);
 
 #ifdef __cplusplus
 }
