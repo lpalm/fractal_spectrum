@@ -769,7 +769,9 @@ inline float3 shade(GSample s, constant FSColorParams &C, float4 st, texture2d<f
         float lit = max(dot(N, L) + wrap, 0.0f) / (L.z + wrap);
         float3 H = normalize(L + float3(0.0f, 0.0f, 1.0f));
         float spec = pow(max(dot(N, H), 0.0f), 48.0f) - pow(H.z, 48.0f);
-        col = mix(col, col * lit + max(spec, 0.0f) * 0.3f, C.lightStrength);
+        // fade the relief out in the smooth far exterior, where shading only produces broad smudges
+        float near = 1.0f / (1.0f + dpx * 0.02f);
+        col = mix(col, col * lit + max(spec, 0.0f) * 0.3f, C.lightStrength * near);
     }
     if (C.edgeStrength > 0.0f) {
         float dpx = exp2(s.de);

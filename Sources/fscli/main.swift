@@ -97,6 +97,7 @@ case "render":
     color.mapping = args.int("mapping", color.mapping)
     color.lightStrength = args.double("light", color.lightStrength)
     color.edgeStrength = args.double("edge", color.edgeStrength)
+    color.offset = args.double("offset", color.offset)
     let t0 = Date()
     guard let img = engine.renderStill(scene: scene, color: color,
                                        options: .init(width: w, height: h, samples: args.int("samples", 4))) else {
