@@ -742,10 +742,6 @@ kernel void stats_smooth(device const uint *stats [[buffer(7)]],
 // ---------------------------------------------------------------------------------------------
 // Colouring
 
-struct Shaded {
-    float3 rgb;
-};
-
 inline float3 shade(GSample s, constant FSColorParams &C, float4 st, texture2d<float> pal, sampler ps) {
     if (s.n == FS_INTERIOR) return C.interior.rgb;
     float base = floor(st.x);

@@ -161,22 +161,6 @@ struct CollapsibleSection<Content: View>: View {
     }
 }
 
-struct SectionHeader: View {
-    let title: String
-    var trailing: AnyView? = nil
-
-    var body: some View {
-        HStack {
-            Text(title.uppercased())
-                .font(.system(size: 11, weight: .semibold, design: .rounded))
-                .tracking(1.2)
-                .foregroundStyle(.secondary)
-            Spacer()
-            trailing
-        }
-    }
-}
-
 struct FractalSection: View {
     @Bindable var model: AppModel
     let thumbs: Thumbnails

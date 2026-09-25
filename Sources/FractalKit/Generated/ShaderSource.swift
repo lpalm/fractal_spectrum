@@ -112,22 +112,16 @@ typedef struct {
     float density;          // palette cycles per unit of mapped iteration
     float offset;           // palette phase
     int mapping;            // 0 linear, 1 sqrt, 2 log
-    float iterLo;           // smoothed lowest iteration of the view
-    float iterSpan;         // smoothed span of escaped iterations
     float lightAzimuth;
     float lightElevation;
     float lightStrength;
     float edgeStrength;     // distance-estimate boundary darkening
-    float glow;
     float paletteRow;       // palette texture row (A)
     float paletteRowB;      // palette texture row (B) for cross-fades
     float paletteMix;
     float paletteCount;
     fs_float4 interior;     // interior colour (linear)
     fs_uint accumulate;     // 0: overwrite accumulator, 1: add
-    fs_uint sampleIndex;
-    float time;
-    float pad0;
 } FSColorParams;
 
 // Display pass: out pixel q (centred) samples the accumulator at A q + b (centred), divided by its sample count.
@@ -889,10 +883,6 @@ kernel void stats_smooth(device const uint *stats [[buffer(7)]],
 
 // ---------------------------------------------------------------------------------------------
 // Colouring
-
-struct Shaded {
-    float3 rgb;
-};
 
 inline float3 shade(GSample s, constant FSColorParams &C, float4 st, texture2d<float> pal, sampler ps) {
     if (s.n == FS_INTERIOR) return C.interior.rgb;
