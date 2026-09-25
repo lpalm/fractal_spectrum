@@ -64,7 +64,7 @@ struct OrbitOverlay: View {
                 .font(.system(size: 12, weight: .semibold, design: .rounded))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
-                .glassEffect(.regular, in: Capsule())
+                .panelGlass(in: Capsule())
                 .fixedSize()
                 .offset(x: orbit.pointer.x + 16, y: orbit.pointer.y + 14)
         }

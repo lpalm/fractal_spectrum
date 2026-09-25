@@ -48,7 +48,7 @@ struct ContentView: View {
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
                         .padding(.horizontal, 18)
                         .padding(.vertical, 10)
-                        .glassEffect(.regular, in: Capsule())
+                        .panelGlass(in: Capsule())
                         .transition(.move(edge: .top).combined(with: .opacity))
                         .padding(.top, 18)
                 }
@@ -116,7 +116,7 @@ struct Sidebar: View {
         }
         .frame(width: 304)
         .frame(maxHeight: .infinity, alignment: .top)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .panelGlass(in: RoundedRectangle(cornerRadius: 26, style: .continuous))
     }
 
     private var header: some View {
@@ -297,7 +297,7 @@ struct LocationsSection: View {
             if !model.bookmarks.isEmpty {
                 Text("Your Places")
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
                 LazyVGrid(columns: columns, spacing: 10) {
                     ForEach(model.bookmarks) { l in
                         PlaceTile(location: l, image: thumbs.image("loc-\(l.id)")) { model.fly(to: l) }
@@ -309,7 +309,7 @@ struct LocationsSection: View {
                 }
                 Text("Curated")
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
                     .padding(.top, 4)
             }
             LazyVGrid(columns: columns, spacing: 10) {
@@ -511,7 +511,7 @@ struct LabeledSlider: View {
                 Text(String(format: value < 10 ? "%.2f" : "%.0f", value))
                     .font(.system(size: 11, weight: .medium, design: .rounded))
                     .monospacedDigit()
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
             }
             if log {
                 Slider(value: Binding(get: { Foundation.log(value) }, set: { value = exp($0) }),
@@ -577,7 +577,7 @@ struct HUDBar: View {
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
-        .glassEffect(.regular, in: Capsule())
+        .panelGlass(in: Capsule())
         .onTapGesture(count: 2) { model.copyCoordinates() }
         .help("Double-click to copy the coordinates")
     }
@@ -617,8 +617,8 @@ struct HUDBar: View {
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                 Text(caption)
-                    .font(.system(size: 9, weight: .medium, design: .rounded))
-                    .foregroundStyle(.tertiary)
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -667,7 +667,7 @@ struct TopControls: View {
                 .frame(width: 34, height: 34)
         }
         .buttonStyle(.plain)
-        .glassEffect(.regular.interactive(), in: Circle())
+        .panelGlass(in: Circle(), interactive: true)
         .help(help)
         .accessibilityLabel(help)
     }
@@ -694,7 +694,7 @@ struct CaptionCard: View {
         }
         .padding(.horizontal, 28)
         .padding(.vertical, 18)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .panelGlass(in: RoundedRectangle(cornerRadius: 26, style: .continuous))
     }
 }
 
@@ -791,7 +791,7 @@ struct HelpOverlay: View {
         }
         .padding(24)
         .frame(width: 820)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .panelGlass(in: RoundedRectangle(cornerRadius: 28, style: .continuous))
     }
 
     private func column(_ part: ArraySlice<(String, String)>) -> some View {

@@ -32,7 +32,7 @@ struct JuliaInset: View {
                 .padding(.horizontal, 4)
         }
         .padding(8)
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .panelGlass(in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .position(x: x, y: y)
     }
 }
