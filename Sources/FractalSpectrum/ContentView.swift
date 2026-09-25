@@ -387,6 +387,7 @@ struct ColorSection: View {
                 Text("Linear").tag(0)
                 Text("Root").tag(1)
                 Text("Log").tag(2)
+                Text("Distance").tag(3)
             }
             .pickerStyle(.segmented)
             .labelsHidden()

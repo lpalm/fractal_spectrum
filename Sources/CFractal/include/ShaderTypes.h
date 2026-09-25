@@ -109,7 +109,8 @@ typedef struct {
     fs_uint useFallback;
     float density;          // palette cycles per unit of mapped iteration
     float offset;           // palette phase
-    int mapping;            // 0 linear, 1 sqrt, 2 log
+    int mapping;            // 0 linear, 1 sqrt, 2 log, 3 distance
+    float deScale;          // log2 of the samples per view radius (distance mapping)
     float lightAzimuth;
     float lightElevation;
     float lightStrength;

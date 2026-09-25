@@ -118,7 +118,7 @@ public struct ColorSettings: Codable, Sendable, Hashable {
     public var palette = 0
     public var density: Double = 0.42
     public var offset: Double = 0.0
-    /// 0 linear, 1 square root, 2 logarithmic.
+    /// 0 linear, 1 square root, 2 logarithmic, 3 distance to the set.
     public var mapping = 2
     public var lightStrength: Double = 0.75
     public var lightAzimuth: Double = 2.3

@@ -297,6 +297,7 @@ public final class Engine: @unchecked Sendable {
         c.density = Float(color.density)
         c.offset = Float(color.offset)
         c.mapping = Int32(color.mapping)
+        c.deScale = Float(log2(Double(max(1, min(gSize.x, gSize.y))) / 2))
         c.lightAzimuth = Float(color.lightAzimuth)
         c.lightElevation = Float(color.lightElevation)
         c.lightStrength = Float(color.lightStrength)

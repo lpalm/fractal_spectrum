@@ -111,7 +111,8 @@ typedef struct {
     fs_uint useFallback;
     float density;          // palette cycles per unit of mapped iteration
     float offset;           // palette phase
-    int mapping;            // 0 linear, 1 sqrt, 2 log
+    int mapping;            // 0 linear, 1 sqrt, 2 log, 3 distance
+    float deScale;          // log2 of the samples per view radius (distance mapping)
     float lightAzimuth;
     float lightElevation;
     float lightStrength;
@@ -915,7 +916,8 @@ inline float3 shade(GSample s, constant FSColorParams &C, float4 st, texture2d<f
     float t;
     if (C.mapping == 0) t = x / 64.0f;
     else if (C.mapping == 1) t = sqrt(x) / 4.0f;
-    else t = log2(1.0f + x);
+    else if (C.mapping == 2) t = log2(1.0f + x);
+    else t = max(C.deScale - s.de, 0.0f) * 0.5f;   // distance to the set, in octaves below the view size
     t = t * C.density + C.offset;
     float rowA = (C.paletteRow + 0.5f) / C.paletteCount;
     float3 col = pal.sample(ps, float2(t, rowA)).rgb;
