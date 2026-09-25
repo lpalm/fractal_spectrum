@@ -777,9 +777,10 @@ kernel void stats_reset(device uint *stats [[buffer(7)]], constant uint &slot [[
 // Colours are absolute (origin 0), so they stay attached to the plane while zooming, unless a view's
 // escape times span fewer than `span` octaves above 0 - deep views, whose escape times differ by a
 // tiny fraction - where the origin rises just enough to restore that span. It moves by `rate` of
-// the way to its target (rate 1 snaps, rate 0 holds) but never above the view's lowest escape time,
-// and holds in views without structure (escape times within 32 iterations), where moving it would
-// only sweep their few colours through the palette.
+// the way to its target but never above the view's lowest escape time. Rate 1 snaps to a new view;
+// a pass without escapes leaves the snap to the next pass. While zooming, the origin holds in views
+// without structure (escape times within 32 iterations), where moving it would only sweep their few
+// colours through the palette.
 kernel void color_origin(device const uint *stats [[buffer(7)]],
                          device float4 *origin [[buffer(0)]],
                          constant float3 &args [[buffer(1)]],   // x: stats slot, y: rate, z: span
@@ -787,12 +788,16 @@ kernel void color_origin(device const uint *stats [[buffer(7)]],
     if (i > 0) return;
     uint slot = uint(args.x);
     uint lo = stats[slot * 8 + 0], hi = stats[slot * 8 + 1], escaped = stats[slot * 8 + 2];
-    if (escaped == 0u) return;
+    float4 o = origin[0];
+    bool snap = args.y == 1.0f || o.w == 0.0f;
+    if (escaped == 0u) {
+        if (snap) origin[0].w = 0.0f;
+        return;
+    }
     float low = float(lo), high = float(hi);
     float k = exp2(args.z);
     float target = max((k * (1.0f + low) - (1.0f + high)) / (k - 1.0f), 0.0f);
-    float4 o = origin[0];
-    float rate = o.w == 0.0f ? 1.0f : (high - low < 32.0f ? 0.0f : args.y);
+    float rate = snap ? 1.0f : (high - low < 32.0f ? 0.0f : args.y);
     // in log space, so that the origin keeps its relative pace from shallow to deep views
     float moved = exp2(mix(log2(1.0f + o.x), log2(1.0f + target), rate)) - 1.0f;
     origin[0] = float4(min(moved, low), 0.0f, 0.0f, 1.0f);
