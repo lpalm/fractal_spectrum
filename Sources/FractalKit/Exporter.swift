@@ -134,7 +134,8 @@ public final class Exporter: @unchecked Sendable {
         }
     }
 
-    /// Renders a zoom video. `progress(fraction, previewImage)` returns false to cancel.
+    /// Renders a zoom video. `progress(fraction, previewImage)` returns false to cancel; it is called
+    /// after every frame, with a preview image at most four times a second.
     public func exportVideo(_ job: VideoJob, to url: URL,
                             progress: @escaping (Double, CGImage?) -> Bool) throws {
         let movie = try VideoWriter(url: url, fileType: job.codec == .prores ? .mov : .mp4, width: job.width,
@@ -151,6 +152,7 @@ public final class Exporter: @unchecked Sendable {
         _ = engine.references.reference(formula: job.formula, view: job.target, minSide: Double(min(job.width, job.height)),
                                         length: 1024, blocking: true)
         var previousView: Viewport?
+        var previewDate = Date.distantPast
         for frame in 0..<frames {
             let t = frames > 1 ? Double(frame) / Double(frames - 1) : 1
             let view = job.view(at: t)
@@ -172,7 +174,9 @@ public final class Exporter: @unchecked Sendable {
                                                         gpuMs: gpuMs, passes: job.samples)
             iteration.maxIter = max(iteration.maxIter, proposal)
             try movie.appendWhenReady(pixelBuffer, at: CMTime(value: CMTimeValue(frame), timescale: CMTimeScale(job.fps)))
-            let preview = frame % 10 == 0 ? Exporter.image(from: pixelBuffer) : nil
+            // previews at most four times a second, and for every frame of a slow stretch
+            let preview = Date().timeIntervalSince(previewDate) >= 0.25 ? Exporter.image(from: pixelBuffer) : nil
+            if preview != nil { previewDate = Date() }
             if !progress(Double(frame + 1) / Double(frames), preview) { throw CocoaError(.userCancelled) }
         }
         try movie.finishAndWait()

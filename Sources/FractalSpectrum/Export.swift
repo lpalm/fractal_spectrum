@@ -32,8 +32,12 @@ final class ExportController {
         Size(name: "Poster 12K", width: 9000, height: 12000),
     ]
 
+    static let fullHD = Size(name: "1080p", width: 1920, height: 1080)
     static let videoSizes: [Size] = [
-        Size(name: "1080p", width: 1920, height: 1080),
+        Size(name: "Preview", width: 320, height: 180),
+        Size(name: "360p", width: 640, height: 360),
+        Size(name: "720p", width: 1280, height: 720),
+        fullHD,
         Size(name: "1440p", width: 2560, height: 1440),
         Size(name: "4K UHD", width: 3840, height: 2160),
         Size(name: "Vertical 1080×1920", width: 1080, height: 1920),
@@ -55,7 +59,7 @@ final class ExportController {
         didSet { defaults.set(imageSamples, forKey: "export.imageSamples") }
     }
     var videoSize = ExportController.videoSizes.first { $0.name == defaults.string(forKey: "export.videoSize") }
-        ?? ExportController.videoSizes[0] {
+        ?? ExportController.fullHD {
         didSet { defaults.set(videoSize.name, forKey: "export.videoSize") }
     }
     var fps = defaults.object(forKey: "export.fps") as? Int ?? 60 {
@@ -190,10 +194,13 @@ final class ExportController {
     /// Renders a zoom video into the video folder (or to `destination`).
     func render(_ job: Exporter.VideoJob, to destination: URL? = nil) {
         let url = destination ?? ExportController.newFile(in: videoFolder, extension: job.codec == .prores ? "mov" : "mp4")
-        run("Rendering \(job.frameCount.formatted()) frames", to: url) { [weak self] exporter, token in
+        let frames = job.frameCount
+        run("Frame 0 of \(frames.formatted())", to: url) { [weak self] exporter, token in
             try exporter.exportVideo(job, to: url) { fraction, image in
                 DispatchQueue.main.async {
                     self?.progress = fraction
+                    // the count keeps moving where frames are slow and the bar hardly does
+                    self?.status = "Frame \(Int((fraction * Double(frames)).rounded()).formatted()) of \(frames.formatted())"
                     if let image { self?.preview = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height)) }
                 }
                 return !token.cancelled
@@ -411,7 +418,7 @@ struct ExportSheet: View {
                 }
                 if export.running {
                     ProgressView(value: export.progress)
-                    Button("Cancel") { export.cancel() }.controlSize(.small)
+                    Button("Cancel Export") { export.cancel() }.controlSize(.small)
                 } else if let url = export.lastOutput {
                     Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
                         .controlSize(.small)
